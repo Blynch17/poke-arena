@@ -19,6 +19,10 @@ export interface Move {
   size: number;      // escala del proyectil
   boost?: Partial<Stages>; // mejoras de stats para quien lo usa (ataques de estado)
   lock?: number;     // ms que queda inmóvil quien lo usa
+  fx?: string;        // efecto visual (ver fx.ts)
+  style?: 'dash' | 'reach'; // embestida con contacto / ataque de alcance corto (por defecto, proyectil)
+  dash?: number;      // px que recorre la embestida
+  reach?: number;     // px de alcance del ataque corto
   typeless?: boolean; // sin tipo: ignora STAB y efectividad (Forcejeo)
   recoil?: boolean;   // el usuario pierde 1/4 de sus PS máximos al golpear
 }
@@ -44,9 +48,15 @@ export const LEVEL = 50;
 export const HP_MULT = 5; // la vida se multiplica por 5 para que los combates duren más
 export const ENERGY_MAX = 100;
 export const ENERGY_REGEN = 12; // por segundo
-export const PP_FACTOR = 1.5; // usos por combate = PP original x PP_FACTOR
+export const PP_FACTOR = 1.5; // usos por combate = PP original x PP_FACTOR (luego x PP_DOUBLE)
 export const PP_MIN = 5;
+export const PP_DOUBLE = 2;
 export const STAGE_MAX = 6;
+export const STATUS_COST = 50;            // energía de los ataques de mejora
+export const STATUS_COOLDOWN = 8000;      // ms de recarga
+export const STATUS_LOCK_PER_STAGE = 2000; // ms inmóvil por etapa subida
+// Cuánto de la etapa de Velocidad se nota al caminar (0 = nada, 1 = el multiplicador completo del juego).
+export const SPEED_STAGE_EFFECT = 0.3;
 
 export const TYPE_COLOR: Record<PType, number> = {
   normal: 0xd0d0c0, fire: 0xff7a1a, water: 0x3d9bff, grass: 0x4fd14f,
@@ -82,7 +92,7 @@ export const newStages = (): Stages => ({ atk: 0, def: 0, spa: 0, spd: 0, spe: 0
 export const stageMult = (n: number) => (n >= 0 ? (2 + n) / 2 : 2 / (2 - n));
 
 /** Usos máximos de un ataque por combate: PP original ponderado por PP_FACTOR. */
-export const maxUses = (m: Move) => Math.max(PP_MIN, Math.round(m.pp * PP_FACTOR));
+export const maxUses = (m: Move) => Math.max(PP_MIN, Math.round(m.pp * PP_FACTOR)) * PP_DOUBLE;
 
 // Stats del juego (IV 31, EV 0, naturaleza neutra).
 function computeStats(b: BaseStats): Stats {
@@ -125,22 +135,22 @@ export function calcDamage(
 // Ataque de daño: nombre, tipo, categoría, poder, PP, costo, recarga, y datos del proyectil.
 const mv = (
   name: string, type: PType, category: 'physical' | 'special', power: number, pp: number, cost: number,
-  cooldown: number, speed: number, life: number, size: number,
-): Move => ({ name, type, category, power, pp, cost, cooldown, speed, life, size });
+  cooldown: number, speed: number, life: number, size: number, fx: string, extra: Partial<Move> = {},
+): Move => ({ name, type, category, power, pp, cost, cooldown, speed, life, size, fx, ...extra });
 
-// Ataque de estado que mejora los stats de quien lo usa. Inmoviliza 1 s por etapa subida.
+// Ataque de estado que mejora los stats de quien lo usa. Inmoviliza 2 s por etapa subida.
 const st = (name: string, type: PType, pp: number, cost: number, boost: Partial<Stages>): Move => {
   const stages = Object.values(boost).reduce((a, b) => a + (b ?? 0), 0);
   return {
-    name, type, category: 'status', power: 0, pp, cost, cooldown: 3500, speed: 0, life: 0, size: 0,
-    boost, lock: stages * 1000,
+    name, type, category: 'status', power: 0, pp, cost, cooldown: STATUS_COOLDOWN, speed: 0, life: 0, size: 0,
+    boost, lock: stages * STATUS_LOCK_PER_STAGE,
   };
 };
 
 // Cuando se acaban los PP de todos los ataques, el juego obliga a usar Forcejeo.
 export const STRUGGLE: Move = {
   name: 'Forcejeo', type: 'normal', category: 'physical', power: 50, pp: 1, cost: 0, cooldown: 1500,
-  speed: 460, life: 550, size: 1, typeless: true, recoil: true,
+  speed: 460, life: 550, size: 1, typeless: true, recoil: true, fx: 'slam', style: 'dash', dash: 200,
 };
 
 type Raw = Omit<PokemonDef, 'stats' | 'maxHp' | 'speed'>;
@@ -150,60 +160,60 @@ const RAW: Raw[] = [
     id: 'charizard', name: 'Charizard', types: ['fire', 'flying'],
     base: { hp: 78, atk: 84, def: 78, spa: 109, spd: 85, spe: 100 },
     moves: [
-      mv('Ascuas', 'fire', 'special', 40, 25, 22, 1100, 480, 800, 0.7),
-      mv('Ataque Ala', 'flying', 'physical', 60, 35, 31, 1700, 560, 650, 0.9),
-      mv('Lanzallamas', 'fire', 'special', 90, 15, 42, 2600, 420, 1000, 1.3),
-      st('Danza Espada', 'normal', 20, 30, { atk: 2 }),
+      mv('Ascuas', 'fire', 'special', 40, 25, 22, 1100, 480, 800, 0.7, 'ember'),
+      mv('Ataque Ala', 'flying', 'physical', 60, 35, 31, 1700, 560, 650, 0.9, 'wing', { style: 'dash', dash: 260 }),
+      mv('Lanzallamas', 'fire', 'special', 90, 15, 42, 2600, 420, 1000, 1.3, 'flame'),
+      st('Danza Espada', 'normal', 20, STATUS_COST, { atk: 2 }),
     ],
   },
   {
     id: 'blastoise', name: 'Blastoise', types: ['water'],
     base: { hp: 79, atk: 83, def: 100, spa: 85, spd: 105, spe: 78 },
     moves: [
-      mv('Pistola Agua', 'water', 'special', 40, 25, 22, 1100, 500, 800, 0.7),
-      mv('Rayo Hielo', 'ice', 'special', 90, 10, 42, 2500, 560, 900, 0.9),
-      mv('Hidrobomba', 'water', 'special', 110, 5, 49, 3200, 400, 1000, 1.4),
-      st('Defensa Férrea', 'normal', 15, 30, { def: 2 }),
+      mv('Pistola Agua', 'water', 'special', 40, 25, 22, 1100, 500, 800, 0.7, 'water'),
+      mv('Rayo Hielo', 'ice', 'special', 90, 10, 42, 2500, 560, 900, 0.9, 'ice'),
+      mv('Hidrobomba', 'water', 'special', 110, 5, 49, 3200, 400, 1000, 1.4, 'hydro'),
+      st('Defensa Férrea', 'normal', 15, STATUS_COST, { def: 2 }),
     ],
   },
   {
     id: 'venusaur', name: 'Venusaur', types: ['grass', 'poison'],
     base: { hp: 80, atk: 82, def: 83, spa: 100, spd: 100, spe: 80 },
     moves: [
-      st('Desarrollo', 'normal', 20, 30, { atk: 1, spa: 1 }),
-      mv('Hoja Afilada', 'grass', 'physical', 55, 25, 29, 1500, 640, 800, 0.8),
-      mv('Rayo Solar', 'grass', 'special', 120, 10, 52, 3200, 430, 1000, 1.4),
-      mv('Bomba Lodo', 'poison', 'special', 90, 10, 42, 2500, 450, 900, 1.0),
+      st('Desarrollo', 'normal', 20, STATUS_COST, { atk: 1, spa: 1 }),
+      mv('Hoja Afilada', 'grass', 'physical', 55, 25, 29, 1500, 640, 800, 0.8, 'leaf'),
+      mv('Rayo Solar', 'grass', 'special', 120, 10, 52, 3200, 430, 1000, 1.4, 'solar'),
+      mv('Bomba Lodo', 'poison', 'special', 90, 10, 42, 2500, 450, 900, 1.0, 'sludge'),
     ],
   },
   {
     id: 'pikachu', name: 'Pikachu', types: ['electric'],
     base: { hp: 35, atk: 55, def: 40, spa: 50, spd: 50, spe: 90 },
     moves: [
-      mv('Impactrueno', 'electric', 'special', 40, 30, 22, 1000, 620, 750, 0.6),
-      st('Agilidad', 'psychic', 30, 30, { spe: 2 }),
-      mv('Rayo', 'electric', 'special', 90, 15, 42, 2400, 700, 900, 1.0),
-      mv('Trueno', 'electric', 'special', 110, 10, 49, 3000, 480, 1000, 1.1),
+      mv('Impactrueno', 'electric', 'special', 40, 30, 22, 1000, 620, 750, 0.6, 'spark'),
+      st('Agilidad', 'psychic', 30, STATUS_COST, { spe: 2 }),
+      mv('Rayo', 'electric', 'special', 90, 15, 42, 2400, 700, 900, 1.0, 'bolt'),
+      mv('Trueno', 'electric', 'special', 110, 10, 49, 3000, 480, 1000, 1.1, 'thunder'),
     ],
   },
   {
     id: 'alakazam', name: 'Alakazam', types: ['psychic'],
     base: { hp: 55, atk: 50, def: 45, spa: 135, spd: 95, spe: 120 },
     moves: [
-      mv('Confusión', 'psychic', 'special', 50, 25, 26, 1300, 520, 850, 0.8),
-      mv('Psíquico', 'psychic', 'special', 90, 10, 42, 2500, 480, 1000, 1.2),
-      mv('Bola Sombra', 'ghost', 'special', 80, 15, 38, 2200, 500, 950, 1.0),
-      st('Paz Mental', 'psychic', 20, 30, { spa: 1, spd: 1 }),
+      mv('Confusión', 'psychic', 'special', 50, 25, 26, 1300, 520, 850, 0.8, 'psy'),
+      mv('Psíquico', 'psychic', 'special', 90, 10, 42, 2500, 480, 1000, 1.2, 'psychic'),
+      mv('Bola Sombra', 'ghost', 'special', 80, 15, 38, 2200, 500, 950, 1.0, 'shadow'),
+      st('Paz Mental', 'psychic', 20, STATUS_COST, { spa: 1, spd: 1 }),
     ],
   },
   {
     id: 'gengar', name: 'Gengar', types: ['ghost', 'poison'],
     base: { hp: 60, atk: 65, def: 60, spa: 130, spd: 75, spe: 110 },
     moves: [
-      mv('Lengüetazo', 'ghost', 'physical', 30, 30, 18, 900, 520, 650, 0.7),
-      mv('Bola Sombra', 'ghost', 'special', 80, 15, 38, 2200, 500, 950, 1.0),
-      mv('Bomba Lodo', 'poison', 'special', 90, 10, 42, 2500, 460, 900, 1.0),
-      st('Maquinación', 'psychic', 20, 30, { spa: 2 }),
+      mv('Lengüetazo', 'ghost', 'physical', 30, 30, 18, 900, 520, 650, 0.7, 'lick', { style: 'reach', reach: 190 }),
+      mv('Bola Sombra', 'ghost', 'special', 80, 15, 38, 2200, 500, 950, 1.0, 'shadow'),
+      mv('Bomba Lodo', 'poison', 'special', 90, 10, 42, 2500, 460, 900, 1.0, 'sludge'),
+      st('Maquinación', 'psychic', 20, STATUS_COST, { spa: 2 }),
     ],
   },
 ];

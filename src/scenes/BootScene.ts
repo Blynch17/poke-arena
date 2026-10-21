@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { POKEMON } from '../data';
+import { makeFxTextures } from '../fx';
 
 export class BootScene extends Phaser.Scene {
   constructor() {
@@ -23,6 +24,7 @@ export class BootScene extends Phaser.Scene {
     g.fillStyle(0xffffff, 1).fillCircle(16, 16, 6);
     g.generateTexture('orb', 32, 32);
     g.destroy();
+    makeFxTextures(this);
     this.scene.start('Select');
   }
 }
