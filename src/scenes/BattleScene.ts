@@ -6,6 +6,13 @@ import {
 const A = { x: 20, y: 84, w: 920, h: 480 }; // arena
 const R = 30; // radio de colisión de los Pokémon
 const MOVE_KEYS = ['U', 'I', 'O', 'P'];
+const SPRITE_SCALE = 3; // los sprites de overworld miden 32x32
+
+// Hoja de caminata: 2 cuadros por fila; filas = abajo, arriba, izquierda, derecha.
+function walkRow(f: Phaser.Math.Vector2): number {
+  if (Math.abs(f.x) >= Math.abs(f.y)) return f.x >= 0 ? 3 : 2;
+  return f.y >= 0 ? 0 : 1;
+}
 
 interface Member { def: PokemonDef; hp: number; energy: number }
 
@@ -21,6 +28,7 @@ interface Side {
   invuln: number;
   kb: Phaser.Math.Vector2;
   down: boolean;
+  moving: boolean;
 }
 
 interface Shot {
@@ -112,12 +120,12 @@ export class BattleScene extends Phaser.Scene {
   private makeSide(isPlayer: boolean, defs: PokemonDef[], x: number, y: number): Side {
     const team = defs.map((def) => ({ def, hp: def.maxHp, energy: ENERGY_MAX }));
     const facing = new Phaser.Math.Vector2(isPlayer ? 1 : -1, 0);
-    const sprite = this.add.image(x, y, `${defs[0].id}-front`).setDepth(10);
+    const sprite = this.add.image(x, y, `${defs[0].id}-walk`, 0).setScale(SPRITE_SCALE).setDepth(10);
     const shadow = this.add.ellipse(x, y + 36, 60, 18, 0x000000, 0.3).setDepth(5);
     const arrow = this.add.triangle(0, 0, 0, -9, 18, 0, 0, 9, 0xffffff, 0.85).setDepth(6);
     return {
       isPlayer, team, active: 0, sprite, shadow, arrow, facing,
-      cd: [0, 0, 0, 0], invuln: 0, kb: new Phaser.Math.Vector2(), down: false,
+      cd: [0, 0, 0, 0], invuln: 0, kb: new Phaser.Math.Vector2(), down: false, moving: false,
     };
   }
 
@@ -144,6 +152,7 @@ export class BattleScene extends Phaser.Scene {
 
   private move(side: Side, vx: number, vy: number, s: number) {
     side.kb.scale(Math.pow(0.04, s)); // el empujón se amortigua rápido
+    side.moving = vx !== 0 || vy !== 0;
     side.sprite.x = Phaser.Math.Clamp(side.sprite.x + (vx + side.kb.x) * s, A.x + R, A.x + A.w - R);
     side.sprite.y = Phaser.Math.Clamp(side.sprite.y + (vy + side.kb.y) * s, A.y + R, A.y + A.h - R);
   }
@@ -287,7 +296,7 @@ export class BattleScene extends Phaser.Scene {
     side.active = idx;
     side.down = false;
     side.cd = [this.t + 300, this.t + 300, this.t + 300, this.t + 300];
-    side.sprite.setVisible(true).setTexture(`${this.cur(side).def.id}-front`);
+    side.sprite.setVisible(true).setTexture(`${this.cur(side).def.id}-walk`, 0);
     side.shadow.setVisible(true);
     side.arrow.setVisible(true);
     if (side.isPlayer) this.refreshMoveTexts();
@@ -377,10 +386,8 @@ export class BattleScene extends Phaser.Scene {
     for (const side of [this.player, this.enemy]) {
       if (side.down) continue;
       const f = side.facing;
-      const goingUp = f.y < 0 && Math.abs(f.y) > Math.abs(f.x);
-      const id = this.cur(side).def.id;
-      side.sprite.setTexture(`${id}-${goingUp ? 'back' : 'front'}`);
-      side.sprite.setFlipX(goingUp ? f.x < 0 : f.x > 0);
+      const step = side.moving ? Math.floor(this.t / 180) % 2 : 0; // alterna los 2 cuadros al caminar
+      side.sprite.setTexture(`${this.cur(side).def.id}-walk`, walkRow(f) * 2 + step);
       side.sprite.setAlpha(this.t < side.invuln && Math.floor(this.t / 100) % 2 ? 0.4 : 1);
       side.shadow.setPosition(side.sprite.x, side.sprite.y + 36);
       side.arrow.setPosition(side.sprite.x + f.x * 62, side.sprite.y + f.y * 62).setRotation(Math.atan2(f.y, f.x));

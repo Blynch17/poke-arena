@@ -11,6 +11,7 @@ export class BootScene extends Phaser.Scene {
     for (const p of POKEMON) {
       this.load.image(`${p.id}-front`, `sprites/${p.id}-front.png`);
       this.load.image(`${p.id}-back`, `sprites/${p.id}-back.png`);
+      this.load.spritesheet(`${p.id}-walk`, `sprites/${p.id}-walk.png`, { frameWidth: 32, frameHeight: 32 });
     }
   }
 
