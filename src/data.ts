@@ -2,30 +2,60 @@ export type PType =
   | 'normal' | 'fire' | 'water' | 'grass' | 'electric'
   | 'ice' | 'poison' | 'flying' | 'psychic' | 'ghost';
 
+export type Category = 'physical' | 'special' | 'status';
+export type StatKey = 'atk' | 'def' | 'spa' | 'spd' | 'spe';
+export type Stages = Record<StatKey, number>;
+
 export interface Move {
   name: string;
   type: PType;
-  power: number;
-  cost: number;     // energía
-  cooldown: number; // ms
-  speed: number;    // px/s del proyectil
-  life: number;     // ms de vuelo
-  size: number;     // escala del proyectil
+  category: Category;
+  power: number;     // poder base del juego original (0 en los de estado)
+  pp: number;        // PP original del juego
+  cost: number;      // energía
+  cooldown: number;  // ms
+  speed: number;     // px/s del proyectil
+  life: number;      // ms de vuelo
+  size: number;      // escala del proyectil
+  boost?: Partial<Stages>; // mejoras de stats para quien lo usa (ataques de estado)
+  lock?: number;     // ms que queda inmóvil quien lo usa
+  typeless?: boolean; // sin tipo: ignora STAB y efectividad (Forcejeo)
+  recoil?: boolean;   // el usuario pierde 1/4 de sus PS máximos al golpear
 }
+
+export interface BaseStats {
+  hp: number; atk: number; def: number; spa: number; spd: number; spe: number;
+}
+
+export interface Stats extends BaseStats {}
 
 export interface PokemonDef {
   id: string;
   name: string;
   types: PType[];
-  maxHp: number;
-  speed: number;
+  base: BaseStats;
+  stats: Stats;    // stats calculados al nivel de combate
+  maxHp: number;   // PS en combate (stat de PS x HP_MULT)
+  speed: number;   // px/s de movimiento con el stat de velocidad sin modificar
   moves: [Move, Move, Move, Move]; // teclas U, I, O, P
 }
+
+export const LEVEL = 50;
+export const HP_MULT = 5; // la vida se multiplica por 5 para que los combates duren más
+export const ENERGY_MAX = 100;
+export const ENERGY_REGEN = 12; // por segundo
+export const PP_FACTOR = 1.5; // usos por combate = PP original x PP_FACTOR
+export const PP_MIN = 5;
+export const STAGE_MAX = 6;
 
 export const TYPE_COLOR: Record<PType, number> = {
   normal: 0xd0d0c0, fire: 0xff7a1a, water: 0x3d9bff, grass: 0x4fd14f,
   electric: 0xffe135, ice: 0x8ae6ff, poison: 0xb45cd6, flying: 0xa9b9ff,
   psychic: 0xff5cae, ghost: 0x7a5cc9,
+};
+
+export const STAT_NAME: Record<StatKey, string> = {
+  atk: 'Ataque', def: 'Defensa', spa: 'At. Esp.', spd: 'Def. Esp.', spe: 'Velocidad',
 };
 
 // Multiplicadores del atacante (fila) sobre el defensor (columna). Lo omitido es x1.
@@ -46,73 +76,146 @@ export function effectiveness(move: PType, defender: PType[]): number {
   return defender.reduce((m, t) => m * (CHART[move]?.[t] ?? 1), 1);
 }
 
-const mv = (
-  name: string, type: PType, power: number, cost: number,
-  cooldown: number, speed: number, life: number, size: number,
-): Move => ({ name, type, power, cost, cooldown, speed, life, size });
+export const newStages = (): Stages => ({ atk: 0, def: 0, spa: 0, spd: 0, spe: 0 });
 
-export const POKEMON: PokemonDef[] = [
+// Etapas de stats del juego: +1 = x1.5, +2 = x2 ... / -1 = x2/3, -2 = x1/2 ...
+export const stageMult = (n: number) => (n >= 0 ? (2 + n) / 2 : 2 / (2 - n));
+
+/** Usos máximos de un ataque por combate: PP original ponderado por PP_FACTOR. */
+export const maxUses = (m: Move) => Math.max(PP_MIN, Math.round(m.pp * PP_FACTOR));
+
+// Stats del juego (IV 31, EV 0, naturaleza neutra).
+function computeStats(b: BaseStats): Stats {
+  const other = (v: number) => Math.floor(((2 * v + 31) * LEVEL) / 100) + 5;
+  return {
+    hp: Math.floor(((2 * b.hp + 31) * LEVEL) / 100) + LEVEL + 10,
+    atk: other(b.atk), def: other(b.def), spa: other(b.spa), spd: other(b.spd), spe: other(b.spe),
+  };
+}
+
+export interface DamageResult { damage: number; eff: number; crit: boolean; stab: boolean }
+
+/**
+ * Daño de la fórmula del juego: ((2L/5+2) * poder * A/D / 50 + 2) * crítico * aleatorio * STAB * tipos.
+ * A y D incluyen las etapas de stats; en un crítico se ignoran las bajadas del atacante y las subidas del
+ * defensor. Con random=false devuelve el daño esperado (sin variación ni crítico), útil para la IA.
+ */
+export function calcDamage(
+  att: PokemonDef, def: PokemonDef, move: Move, random = true,
+  attStages: Stages = newStages(), defStages: Stages = newStages(),
+): DamageResult {
+  const physical = move.category === 'physical';
+  const crit = random && Math.random() < 1 / 24;
+  const aKey: StatKey = physical ? 'atk' : 'spa';
+  const dKey: StatKey = physical ? 'def' : 'spd';
+  const aStage = crit ? Math.max(0, attStages[aKey]) : attStages[aKey];
+  const dStage = crit ? Math.min(0, defStages[dKey]) : defStages[dKey];
+  const A = Math.floor(att.stats[aKey] * stageMult(aStage));
+  const D = Math.max(1, Math.floor(def.stats[dKey] * stageMult(dStage)));
+  const eff = move.typeless ? 1 : effectiveness(move.type, def.types);
+  const stab = !move.typeless && att.types.includes(move.type);
+  let dmg = Math.floor(Math.floor((Math.floor((2 * LEVEL) / 5) + 2) * move.power * A / D) / 50) + 2;
+  if (crit) dmg = Math.floor(dmg * 1.5);
+  if (random) dmg = Math.floor(dmg * (0.85 + Math.random() * 0.15));
+  if (stab) dmg = Math.floor(dmg * 1.5);
+  dmg = Math.floor(dmg * eff);
+  return { damage: eff === 0 ? 0 : Math.max(1, dmg), eff, crit, stab };
+}
+
+// Ataque de daño: nombre, tipo, categoría, poder, PP, costo, recarga, y datos del proyectil.
+const mv = (
+  name: string, type: PType, category: 'physical' | 'special', power: number, pp: number, cost: number,
+  cooldown: number, speed: number, life: number, size: number,
+): Move => ({ name, type, category, power, pp, cost, cooldown, speed, life, size });
+
+// Ataque de estado que mejora los stats de quien lo usa. Inmoviliza 1 s por etapa subida.
+const st = (name: string, type: PType, pp: number, cost: number, boost: Partial<Stages>): Move => {
+  const stages = Object.values(boost).reduce((a, b) => a + (b ?? 0), 0);
+  return {
+    name, type, category: 'status', power: 0, pp, cost, cooldown: 3500, speed: 0, life: 0, size: 0,
+    boost, lock: stages * 1000,
+  };
+};
+
+// Cuando se acaban los PP de todos los ataques, el juego obliga a usar Forcejeo.
+export const STRUGGLE: Move = {
+  name: 'Forcejeo', type: 'normal', category: 'physical', power: 50, pp: 1, cost: 0, cooldown: 1500,
+  speed: 460, life: 550, size: 1, typeless: true, recoil: true,
+};
+
+type Raw = Omit<PokemonDef, 'stats' | 'maxHp' | 'speed'>;
+
+const RAW: Raw[] = [
   {
-    id: 'charizard', name: 'Charizard', types: ['fire', 'flying'], maxHp: 200, speed: 235,
+    id: 'charizard', name: 'Charizard', types: ['fire', 'flying'],
+    base: { hp: 78, atk: 84, def: 78, spa: 109, spd: 85, spe: 100 },
     moves: [
-      mv('Ascuas', 'fire', 11, 8, 280, 480, 800, 0.7),
-      mv('Ataque Ala', 'flying', 17, 14, 600, 560, 650, 0.9),
-      mv('Lanzallamas', 'fire', 27, 28, 1100, 420, 1000, 1.3),
-      mv('Tajo', 'normal', 19, 16, 700, 520, 600, 0.9),
+      mv('Ascuas', 'fire', 'special', 40, 25, 22, 1100, 480, 800, 0.7),
+      mv('Ataque Ala', 'flying', 'physical', 60, 35, 31, 1700, 560, 650, 0.9),
+      mv('Lanzallamas', 'fire', 'special', 90, 15, 42, 2600, 420, 1000, 1.3),
+      st('Danza Espada', 'normal', 20, 30, { atk: 2 }),
     ],
   },
   {
-    id: 'blastoise', name: 'Blastoise', types: ['water'], maxHp: 230, speed: 190,
+    id: 'blastoise', name: 'Blastoise', types: ['water'],
+    base: { hp: 79, atk: 83, def: 100, spa: 85, spd: 105, spe: 78 },
     moves: [
-      mv('Pistola Agua', 'water', 11, 8, 280, 500, 800, 0.7),
-      mv('Rayo Hielo', 'ice', 20, 18, 750, 560, 900, 0.9),
-      mv('Hidrobomba', 'water', 30, 30, 1200, 400, 1000, 1.4),
-      mv('Placaje', 'normal', 15, 10, 500, 460, 550, 1.0),
+      mv('Pistola Agua', 'water', 'special', 40, 25, 22, 1100, 500, 800, 0.7),
+      mv('Rayo Hielo', 'ice', 'special', 90, 10, 42, 2500, 560, 900, 0.9),
+      mv('Hidrobomba', 'water', 'special', 110, 5, 49, 3200, 400, 1000, 1.4),
+      st('Defensa Férrea', 'normal', 15, 30, { def: 2 }),
     ],
   },
   {
-    id: 'venusaur', name: 'Venusaur', types: ['grass', 'poison'], maxHp: 220, speed: 190,
+    id: 'venusaur', name: 'Venusaur', types: ['grass', 'poison'],
+    base: { hp: 80, atk: 82, def: 83, spa: 100, spd: 100, spe: 80 },
     moves: [
-      mv('Látigo Cepa', 'grass', 12, 8, 300, 520, 750, 0.7),
-      mv('Hoja Afilada', 'grass', 18, 15, 650, 640, 800, 0.8),
-      mv('Rayo Solar', 'grass', 30, 32, 1250, 430, 1000, 1.4),
-      mv('Bomba Lodo', 'poison', 21, 20, 800, 450, 900, 1.0),
+      st('Desarrollo', 'normal', 20, 30, { atk: 1, spa: 1 }),
+      mv('Hoja Afilada', 'grass', 'physical', 55, 25, 29, 1500, 640, 800, 0.8),
+      mv('Rayo Solar', 'grass', 'special', 120, 10, 52, 3200, 430, 1000, 1.4),
+      mv('Bomba Lodo', 'poison', 'special', 90, 10, 42, 2500, 450, 900, 1.0),
     ],
   },
   {
-    id: 'pikachu', name: 'Pikachu', types: ['electric'], maxHp: 160, speed: 275,
+    id: 'pikachu', name: 'Pikachu', types: ['electric'],
+    base: { hp: 35, atk: 55, def: 40, spa: 50, spd: 50, spe: 90 },
     moves: [
-      mv('Impactrueno', 'electric', 11, 7, 260, 620, 750, 0.6),
-      mv('Ataque Rápido', 'normal', 13, 8, 380, 700, 450, 0.7),
-      mv('Rayo', 'electric', 25, 24, 1000, 700, 900, 1.0),
-      mv('Bola Voltio', 'electric', 20, 18, 750, 480, 1000, 1.1),
+      mv('Impactrueno', 'electric', 'special', 40, 30, 22, 1000, 620, 750, 0.6),
+      st('Agilidad', 'psychic', 30, 30, { spe: 2 }),
+      mv('Rayo', 'electric', 'special', 90, 15, 42, 2400, 700, 900, 1.0),
+      mv('Trueno', 'electric', 'special', 110, 10, 49, 3000, 480, 1000, 1.1),
     ],
   },
   {
-    id: 'alakazam', name: 'Alakazam', types: ['psychic'], maxHp: 150, speed: 250,
+    id: 'alakazam', name: 'Alakazam', types: ['psychic'],
+    base: { hp: 55, atk: 50, def: 45, spa: 135, spd: 95, spe: 120 },
     moves: [
-      mv('Confusión', 'psychic', 12, 8, 300, 520, 850, 0.8),
-      mv('Psíquico', 'psychic', 24, 22, 900, 480, 1000, 1.2),
-      mv('Bola Sombra', 'ghost', 21, 18, 750, 500, 950, 1.0),
-      mv('Rayo Hielo', 'ice', 19, 17, 700, 560, 900, 0.9),
+      mv('Confusión', 'psychic', 'special', 50, 25, 26, 1300, 520, 850, 0.8),
+      mv('Psíquico', 'psychic', 'special', 90, 10, 42, 2500, 480, 1000, 1.2),
+      mv('Bola Sombra', 'ghost', 'special', 80, 15, 38, 2200, 500, 950, 1.0),
+      st('Paz Mental', 'psychic', 20, 30, { spa: 1, spd: 1 }),
     ],
   },
   {
-    id: 'gengar', name: 'Gengar', types: ['ghost', 'poison'], maxHp: 170, speed: 240,
+    id: 'gengar', name: 'Gengar', types: ['ghost', 'poison'],
+    base: { hp: 60, atk: 65, def: 60, spa: 130, spd: 75, spe: 110 },
     moves: [
-      mv('Lengüetazo', 'ghost', 11, 7, 280, 520, 650, 0.7),
-      mv('Bola Sombra', 'ghost', 22, 20, 800, 500, 950, 1.0),
-      mv('Bomba Lodo', 'poison', 21, 18, 750, 460, 900, 1.0),
-      mv('Psíquico', 'psychic', 23, 22, 900, 470, 1000, 1.1),
+      mv('Lengüetazo', 'ghost', 'physical', 30, 30, 18, 900, 520, 650, 0.7),
+      mv('Bola Sombra', 'ghost', 'special', 80, 15, 38, 2200, 500, 950, 1.0),
+      mv('Bomba Lodo', 'poison', 'special', 90, 10, 42, 2500, 460, 900, 1.0),
+      st('Maquinación', 'psychic', 20, 30, { spa: 2 }),
     ],
   },
 ];
 
-export const ENERGY_MAX = 100;
-export const ENERGY_REGEN = 14; // por segundo
+export const POKEMON: PokemonDef[] = RAW.map((r) => {
+  const stats = computeStats(r.base);
+  return { ...r, stats, maxHp: stats.hp * HP_MULT, speed: Math.round(100 + stats.spe * 1.1) };
+});
 
+// Las curaciones también se multiplican por HP_MULT (Poción original: 20 PS).
 export const ITEMS = {
-  potion: { name: 'Poción', desc: '+60 PS', hp: 60, energy: 0 },
+  potion: { name: 'Poción', desc: `+${20 * HP_MULT} PS`, hp: 20 * HP_MULT, energy: 0 },
   ether: { name: 'Éter', desc: '+60 Energía', hp: 0, energy: 60 },
 } as const;
 export type ItemId = keyof typeof ITEMS;

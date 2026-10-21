@@ -72,7 +72,11 @@ export class SelectScene extends Phaser.Scene {
       b.setText(k >= 0 ? `${k + 1}` : '');
     });
     const p = POKEMON[this.cursor];
-    this.info.setText(`${p.name}  ·  PS ${p.maxHp}  ·  Velocidad ${p.speed}\n${p.moves.map((m, i) => `${'UIOP'[i]}: ${m.name}`).join('   ')}`);
+    const st = p.stats;
+    this.info.setText(
+      `${p.name}  ·  PS ${p.maxHp}  Atq ${st.atk}  Def ${st.def}  AtqEsp ${st.spa}  DefEsp ${st.spd}  Vel ${st.spe}\n` +
+        p.moves.map((m, i) => `${'UIOP'[i]}: ${m.name}`).join('   '),
+    );
     this.hint.setText(
       this.picks.length === TEAM_SIZE
         ? 'ENTER: ¡Comenzar!   (Retroceso: quitar el último)'

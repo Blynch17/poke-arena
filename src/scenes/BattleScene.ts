@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import {
-  POKEMON, PokemonDef, Move, effectiveness, TYPE_COLOR, ITEMS, ItemId, ENERGY_MAX, ENERGY_REGEN,
+  POKEMON, PokemonDef, Move, Stages, StatKey, calcDamage, TYPE_COLOR, ITEMS, ItemId, ENERGY_MAX, ENERGY_REGEN,
+  STRUGGLE, newStages, stageMult, maxUses, STAT_NAME, STAGE_MAX,
 } from '../data';
 
 const A = { x: 20, y: 84, w: 920, h: 480 }; // arena
@@ -14,7 +15,9 @@ function walkRow(f: Phaser.Math.Vector2): number {
   return f.y >= 0 ? 0 : 1;
 }
 
-interface Member { def: PokemonDef; hp: number; energy: number }
+interface Member { def: PokemonDef; hp: number; energy: number; stages: Stages; pp: number[] }
+
+const STAT_SHORT: Record<StatKey, string> = { atk: 'Atq', def: 'Def', spa: 'AtE', spd: 'DeE', spe: 'Vel' };
 
 interface Side {
   isPlayer: boolean;
@@ -29,6 +32,8 @@ interface Side {
   kb: Phaser.Math.Vector2;
   down: boolean;
   moving: boolean;
+  lockUntil: number; // inmóvil hasta este instante (ataques de mejora)
+  aura: Phaser.GameObjects.Ellipse;
 }
 
 interface Shot {
@@ -36,6 +41,7 @@ interface Shot {
   vx: number;
   vy: number;
   owner: Side;
+  att: Member; // quien lo lanzó, para usar sus stats aunque se cambie de Pokémon
   move: Move;
   dieAt: number;
 }
@@ -56,6 +62,7 @@ export class BattleScene extends Phaser.Scene {
   private hudTexts!: Record<string, Phaser.GameObjects.Text>;
   private moveTexts: Phaser.GameObjects.Text[][] = [];
   private noEnergyAt = -9999;
+  private noPpAt = -9999;
   private enemySwapAt = 0;
 
   private menuLayer!: Phaser.GameObjects.Container;
@@ -63,7 +70,7 @@ export class BattleScene extends Phaser.Scene {
 
   private ai = {
     nextFire: 1500, strafe: 1, strafeUntil: 0, aimErr: 0, aimUntil: 0,
-    dodgeUntil: 0, dodge: new Phaser.Math.Vector2(), ideal: 240,
+    dodgeUntil: 0, dodge: new Phaser.Math.Vector2(), ideal: 240, hist: [] as number[], waits: 0,
   };
 
   constructor() {
@@ -80,6 +87,8 @@ export class BattleScene extends Phaser.Scene {
     this.enemySwapAt = 0;
     this.menu = { screen: '', idx: 0, forced: false, msg: '' };
     this.ai.nextFire = 1500;
+    this.ai.hist = [];
+    this.ai.waits = 0;
     this.input.keyboard!.addCapture('UP,DOWN,LEFT,RIGHT,ENTER,SPACE');
 
     this.drawArena();
@@ -118,18 +127,28 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private makeSide(isPlayer: boolean, defs: PokemonDef[], x: number, y: number): Side {
-    const team = defs.map((def) => ({ def, hp: def.maxHp, energy: ENERGY_MAX }));
+    const team: Member[] = defs.map((def) => ({
+      def, hp: def.maxHp, energy: ENERGY_MAX, stages: newStages(), pp: def.moves.map(maxUses),
+    }));
     const facing = new Phaser.Math.Vector2(isPlayer ? 1 : -1, 0);
     const sprite = this.add.image(x, y, `${defs[0].id}-walk`, 0).setScale(SPRITE_SCALE).setDepth(10);
     const shadow = this.add.ellipse(x, y + 36, 60, 18, 0x000000, 0.3).setDepth(5);
     const arrow = this.add.triangle(0, 0, 0, -9, 18, 0, 0, 9, 0xffffff, 0.85).setDepth(6);
+    const aura = this.add.ellipse(x, y, 96, 104, 0xffe066, 0.3).setStrokeStyle(3, 0xffe066).setDepth(4).setVisible(false);
     return {
       isPlayer, team, active: 0, sprite, shadow, arrow, facing,
       cd: [0, 0, 0, 0], invuln: 0, kb: new Phaser.Math.Vector2(), down: false, moving: false,
+      lockUntil: 0, aura,
     };
   }
 
   private cur(s: Side): Member { return s.team[s.active]; }
+
+  // Velocidad de movimiento (px/s) con las etapas de Velocidad aplicadas.
+  private speedOf(s: Side): number {
+    const m = this.cur(s);
+    return Math.round(100 + Math.floor(m.def.stats.spe * stageMult(m.stages.spe)) * 1.1);
+  }
 
   // ---------- bucle principal ----------
 
@@ -186,10 +205,10 @@ export class BattleScene extends Phaser.Scene {
       (k.S.isDown ? 1 : 0) - (k.W.isDown ? 1 : 0),
     );
     let vx = 0, vy = 0;
-    if (dir.lengthSq() > 0) {
+    if (dir.lengthSq() > 0 && this.t >= p.lockUntil) {
       dir.normalize();
       p.facing.copy(dir);
-      const sp = this.cur(p).def.speed;
+      const sp = this.speedOf(p);
       vx = dir.x * sp; vy = dir.y * sp;
     }
     this.move(p, vx, vy, s);
@@ -201,22 +220,60 @@ export class BattleScene extends Phaser.Scene {
   // ---------- ataques ----------
 
   private tryFire(side: Side, i: number): boolean {
-    if (side.down || this.t < side.cd[i]) return false;
+    if (side.down || this.t < side.lockUntil) return false;
     const m = this.cur(side);
-    const mv = m.def.moves[i];
+    const struggle = m.pp.every((n) => n <= 0); // sin PP en ningún ataque: Forcejeo
+    const ci = struggle ? 0 : i; // Forcejeo comparte una sola recarga
+    if (this.t < side.cd[ci]) return false;
+    const mv = struggle ? STRUGGLE : m.def.moves[i];
+    if (!struggle && m.pp[i] <= 0) {
+      if (side.isPlayer && this.t - this.noPpAt > 700) {
+        this.noPpAt = this.t;
+        this.floatText(side.sprite.x, side.sprite.y - 60, '¡Sin PP!', '#ff8888');
+      }
+      return false;
+    }
     if (m.energy < mv.cost) {
       if (side.isPlayer) this.noEnergyAt = this.t;
       return false;
     }
     m.energy -= mv.cost;
-    side.cd[i] = this.t + mv.cooldown;
+    if (!struggle) m.pp[i]--;
+    side.cd[ci] = this.t + mv.cooldown;
+    if (struggle && side.isPlayer) this.floatText(side.sprite.x, side.sprite.y - 60, '¡Forcejeo!', '#ffb86b');
+    if (mv.category === 'status') {
+      this.applyBoost(side, m, mv);
+      return true;
+    }
     const f = side.facing;
     const img = this.add.image(side.sprite.x + f.x * 44, side.sprite.y + f.y * 44, 'orb')
       .setTint(TYPE_COLOR[mv.type]).setScale(mv.size).setDepth(8);
     this.shots.push({
-      img, vx: f.x * mv.speed, vy: f.y * mv.speed, owner: side, move: mv, dieAt: this.t + mv.life,
+      img, vx: f.x * mv.speed, vy: f.y * mv.speed, owner: side, att: m, move: mv, dieAt: this.t + mv.life,
     });
     return true;
+  }
+
+  // Ataque de estado: sube las etapas de stats y deja al usuario inmóvil mientras se concentra.
+  private applyBoost(side: Side, m: Member, mv: Move) {
+    const x = side.sprite.x, y = side.sprite.y;
+    const notes: string[] = [];
+    (Object.keys(mv.boost!) as StatKey[]).forEach((k) => {
+      const before = m.stages[k];
+      m.stages[k] = Phaser.Math.Clamp(before + mv.boost![k]!, -STAGE_MAX, STAGE_MAX);
+      const gained = m.stages[k] - before;
+      notes.push(gained === 0 ? `${STAT_NAME[k]} no puede subir más` : `${STAT_NAME[k]} ${gained >= 2 ? '▲▲' : '▲'}`);
+    });
+    side.lockUntil = this.t + (mv.lock ?? 0);
+    notes.forEach((n, i) => this.floatText(x, y - 56 - i * 22, n, '#ffe066'));
+    const rings = Math.max(1, Math.ceil((mv.lock ?? 0) / 450));
+    for (let r = 0; r < rings; r++) {
+      const ring = this.add.circle(x, y, 28, 0xffe066, 0).setStrokeStyle(4, 0xffe066).setDepth(7).setAlpha(0);
+      this.tweens.add({
+        targets: ring, scale: 2.4, alpha: { from: 0.9, to: 0 }, duration: 650, delay: r * 450,
+        onStart: () => ring.setPosition(side.sprite.x, side.sprite.y), onComplete: () => ring.destroy(),
+      });
+    }
   }
 
   private updateShots(s: number) {
@@ -243,8 +300,8 @@ export class BattleScene extends Phaser.Scene {
 
   private hit(sh: Shot, target: Side) {
     const mem = this.cur(target);
-    const eff = effectiveness(sh.move.type, mem.def.types);
-    const dmg = Math.round(sh.move.power * eff * (0.9 + Math.random() * 0.2));
+    const att = sh.att;
+    const { damage: dmg, eff, crit } = calcDamage(att.def, mem.def, sh.move, true, att.stages, mem.stages);
     mem.hp = Math.max(0, mem.hp - dmg);
 
     const len = Math.hypot(sh.vx, sh.vy) || 1;
@@ -260,10 +317,17 @@ export class BattleScene extends Phaser.Scene {
     if (eff === 0) this.floatText(tx, ty, 'No afecta...', '#cccccc');
     else {
       this.floatText(tx, ty, `-${dmg}`, eff > 1 ? '#ffd23f' : '#ffffff');
-      if (eff > 1) this.floatText(tx, ty - 22, '¡Muy eficaz!', '#ff9d3f');
-      else if (eff < 1) this.floatText(tx, ty - 22, 'Poco eficaz...', '#9fb8d8');
+      const notes = [crit ? '¡Golpe crítico!' : '', eff > 1 ? '¡Muy eficaz!' : eff < 1 ? 'Poco eficaz...' : ''].filter(Boolean);
+      notes.forEach((n, i) => this.floatText(tx, ty - 22 * (i + 1), n, n.startsWith('¡G') ? '#ff6b6b' : eff > 1 ? '#ff9d3f' : '#9fb8d8'));
     }
     if (mem.hp <= 0) this.faint(target);
+
+    if (sh.move.recoil && att.hp > 0) {
+      const back = Math.floor(att.def.maxHp / 4);
+      att.hp = Math.max(0, att.hp - back);
+      this.floatText(sh.owner.sprite.x, sh.owner.sprite.y - 50, `-${back} (retroceso)`, '#ff9d9d');
+      if (att.hp <= 0 && this.cur(sh.owner) === att && !sh.owner.down) this.faint(sh.owner);
+    }
   }
 
   // ---------- debilitados / cambios ----------
@@ -273,6 +337,7 @@ export class BattleScene extends Phaser.Scene {
     side.sprite.setVisible(false);
     side.shadow.setVisible(false);
     side.arrow.setVisible(false);
+    side.aura.setVisible(false);
     this.floatText(side.sprite.x, side.sprite.y - 30, `¡${this.cur(side).def.name} se debilitó!`, '#ff6666');
     const alive = side.team.some((m) => m.hp > 0);
     if (side.isPlayer) {
@@ -293,7 +358,10 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private switchTo(side: Side, idx: number) {
+    this.cur(side).stages = newStages(); // las mejoras se pierden al retirar al Pokémon
     side.active = idx;
+    this.cur(side).stages = newStages();
+    side.lockUntil = 0;
     side.down = false;
     side.cd = [this.t + 300, this.t + 300, this.t + 300, this.t + 300];
     side.sprite.setVisible(true).setTexture(`${this.cur(side).def.id}-walk`, 0);
@@ -303,6 +371,7 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private finish(victory: boolean) {
+    if (this.over) return;
     this.over = true;
     const bg = this.add.rectangle(480, 320, 960, 640, 0x000000, 0.6).setDepth(90);
     const t1 = this.add.text(480, 270, victory ? '¡VICTORIA!' : 'DERROTA', {
@@ -318,6 +387,7 @@ export class BattleScene extends Phaser.Scene {
   private aiUpdate(s: number) {
     const e = this.enemy, p = this.player, ai = this.ai;
     if (e.down) return;
+    const locked = this.t < e.lockUntil; // concentrándose tras un ataque de mejora
     const dx = p.sprite.x - e.sprite.x, dy = p.sprite.y - e.sprite.y;
     const dist = Math.hypot(dx, dy) || 1;
     const nx = dx / dist, ny = dy / dist;
@@ -327,7 +397,7 @@ export class BattleScene extends Phaser.Scene {
       ai.aimUntil = this.t + 500 + Math.random() * 500;
     }
     const ang = Math.atan2(dy, dx) + ai.aimErr;
-    e.facing.set(Math.cos(ang), Math.sin(ang));
+    if (!locked) e.facing.set(Math.cos(ang), Math.sin(ang));
 
     if (this.t > ai.strafeUntil) {
       ai.strafe = Math.random() < 0.5 ? 1 : -1;
@@ -363,21 +433,73 @@ export class BattleScene extends Phaser.Scene {
     if (e.sprite.y > A.y + A.h - 90) my -= 1;
 
     const len = Math.hypot(mx, my);
-    const sp = this.cur(e).def.speed * 0.85;
-    this.move(e, len ? (mx / len) * sp : 0, len ? (my / len) * sp : 0, s);
+    const sp = this.speedOf(e) * 0.85;
+    const go = len && !locked;
+    this.move(e, go ? (mx / len) * sp : 0, go ? (my / len) * sp : 0, s);
 
-    if (this.t >= ai.nextFire) {
-      const mem = this.cur(e);
-      let best = -1, bestScore = -1;
-      mem.def.moves.forEach((mv, i) => {
-        if (this.t < e.cd[i] || mem.energy < mv.cost) return;
-        if (dist > ((mv.speed * mv.life) / 1000) * 0.9) return;
-        const score = mv.power * effectiveness(mv.type, this.cur(p).def.types) + Math.random() * 10;
-        if (score > bestScore) { bestScore = score; best = i; }
-      });
-      if (best >= 0 && this.tryFire(e, best)) ai.nextFire = this.t + 400 + Math.random() * 600;
-      else ai.nextFire = this.t + 150;
+    if (this.t >= ai.nextFire && !locked) this.aiAttack(dist);
+  }
+
+  // Elige el siguiente ataque del rival: varía entre los que le hacen buen daño, evita los que no
+  // afectan, respeta PP y energía, y de vez en cuando se concentra para mejorar sus stats.
+  private aiAttack(dist: number) {
+    const e = this.enemy, ai = this.ai;
+    const mem = this.cur(e), foe = this.cur(this.player);
+    const moves = mem.def.moves;
+    if (mem.pp.every((n) => n <= 0)) {
+      this.tryFire(e, 0); // Forcejeo
+      ai.nextFire = this.t + 600;
+      return;
     }
+    const inRange = (mv: Move) => dist <= ((mv.speed * mv.life) / 1000) * 0.9;
+    const ready = (i: number) => mem.pp[i] > 0 && this.t >= e.cd[i] && mem.energy >= moves[i].cost;
+    const dmg = moves.map((mv) =>
+      mv.category === 'status' || !inRange(mv) ? 0 : calcDamage(mem.def, foe.def, mv, false, mem.stages, foe.stages).damage);
+
+    // Mejora de stats: lejos del rival, con energía de sobra y si aún tiene margen de subida.
+    const boost = moves.findIndex((mv, i) =>
+      mv.category === 'status' && ready(i) && mem.energy >= mv.cost + 10 &&
+      (Object.keys(mv.boost!) as StatKey[]).some((k) => mem.stages[k] < 2));
+    if (boost >= 0 && dist > 200 && Math.random() < 0.4 && this.tryFire(e, boost)) {
+      ai.nextFire = this.t + 1500;
+      return;
+    }
+
+    const cand = moves.map((_, i) => i).filter((i) => dmg[i] > 0 && ready(i));
+    let pick = -1;
+    if (cand.length) {
+      const topC = Math.max(...cand.map((i) => dmg[i]));
+      const pool = cand.filter((i) => dmg[i] >= topC * 0.55); // solo los que valen la pena
+      // Pesos por daño, castigando repetir el mismo ataque para que vaya variando.
+      const w = pool.map((i) => {
+        const [last, prev] = [ai.hist[ai.hist.length - 1], ai.hist[ai.hist.length - 2]];
+        return dmg[i] ** 2 * (i === last ? 0.3 : i === prev ? 0.7 : 1);
+      });
+      let r = Math.random() * w.reduce((a, b) => a + b, 0);
+      pick = pool[pool.length - 1];
+      for (let k = 0; k < pool.length; k++) {
+        r -= w[k];
+        if (r <= 0) { pick = pool[k]; break; }
+      }
+    }
+    // No gastar la energía en un ataque flojo si el mejor está casi listo.
+    const top = Math.max(...dmg);
+    if (pick >= 0 && dmg[pick] < top * 0.6) {
+      const j = dmg.indexOf(top);
+      if (moves[j].cost - mem.energy <= 25 && e.cd[j] - this.t <= 1500 && mem.pp[j] > 0) pick = -1;
+    }
+    // Si iba a repetir el último ataque y hay otro igual de bueno casi listo, espera por ese.
+    if (pick >= 0 && pick === ai.hist[ai.hist.length - 1] && ai.waits < 14) {
+      const alt = moves.findIndex((mv, j) =>
+        j !== pick && dmg[j] >= top * 0.55 && mem.pp[j] > 0 && mv.cost - mem.energy <= 22 && e.cd[j] - this.t <= 1200);
+      if (alt >= 0) { pick = -1; ai.waits++; }
+    }
+    if (pick >= 0 && this.tryFire(e, pick)) {
+      ai.waits = 0;
+      ai.hist.push(pick);
+      if (ai.hist.length > 3) ai.hist.shift();
+      ai.nextFire = this.t + 400 + Math.random() * 600;
+    } else ai.nextFire = this.t + 150;
   }
 
   // ---------- visuales ----------
@@ -392,6 +514,12 @@ export class BattleScene extends Phaser.Scene {
       side.shadow.setPosition(side.sprite.x, side.sprite.y + 36);
       side.arrow.setPosition(side.sprite.x + f.x * 62, side.sprite.y + f.y * 62).setRotation(Math.atan2(f.y, f.x));
       side.sprite.setDepth(10 + side.sprite.y / 1000);
+      const locked = this.t < side.lockUntil;
+      side.aura.setVisible(locked);
+      if (locked) {
+        side.aura.setPosition(side.sprite.x, side.sprite.y + 4)
+          .setFillStyle(0xffe066, 0.18 + 0.14 * Math.sin(this.t / 110));
+      }
     }
   }
 
@@ -402,8 +530,10 @@ export class BattleScene extends Phaser.Scene {
       pHp: this.add.text(330, 33, '', st(13)).setOrigin(1, 0).setDepth(51),
       eName: this.add.text(940, 8, '', st(20)).setOrigin(1, 0).setDepth(51),
       eHp: this.add.text(630, 33, '', st(13)).setDepth(51),
+      pSt: this.add.text(96, 68, '', st(12, '#ffe066')).setDepth(51),
+      eSt: this.add.text(940, 68, '', st(12, '#ffe066')).setOrigin(1, 0).setDepth(51),
       items: this.add.text(940, 575, '', st(15, '#cfe8cf')).setOrigin(1, 0).setDepth(51),
-      help: this.add.text(940, 600, 'WASD mover · U I O P atacar · ENTER menú', st(15, '#9fb8a6')).setOrigin(1, 0).setDepth(51),
+      help: this.add.text(940, 604, 'WASD mover · UIOP atacar · ENTER menú', st(12, '#9fb8a6')).setOrigin(1, 0).setDepth(51),
       toast: this.add.text(480, 110, '', { fontSize: '26px', color: '#fff', stroke: '#000', strokeThickness: 5 })
         .setOrigin(0.5).setDepth(60).setAlpha(0),
     };
@@ -421,7 +551,7 @@ export class BattleScene extends Phaser.Scene {
     const def = this.cur(this.player).def;
     def.moves.forEach((mv, i) => {
       this.moveTexts[i][1].setText(mv.name);
-      this.moveTexts[i][2].setText(`${mv.type} · ⚡${mv.cost}`);
+      this.moveTexts[i][2].setText(`⚡${mv.cost}`);
     });
   }
 
@@ -452,6 +582,11 @@ export class BattleScene extends Phaser.Scene {
     this.hudTexts.pHp.setText(`${Math.ceil(pm.hp)}/${pm.def.maxHp}`);
     this.hudTexts.eName.setText(em.def.name);
     this.hudTexts.eHp.setText(`${Math.ceil(em.hp)}/${em.def.maxHp}`);
+    const stagesLine = (m: Member) =>
+      (Object.keys(m.stages) as StatKey[]).filter((k) => m.stages[k] !== 0)
+        .map((k) => `${STAT_SHORT[k]} ${m.stages[k] > 0 ? '+' : ''}${m.stages[k]}`).join('  ');
+    this.hudTexts.pSt.setText(stagesLine(pm));
+    this.hudTexts.eSt.setText(stagesLine(em));
     this.hudTexts.items.setText(`Poción x${this.inventory.potion}   Éter x${this.inventory.ether}`);
 
     pm.def.moves.forEach((mv, i) => {
@@ -459,7 +594,9 @@ export class BattleScene extends Phaser.Scene {
       g.lineStyle(3, TYPE_COLOR[mv.type]).strokeRect(x, 576, 140, 56);
       const cdLeft = Phaser.Math.Clamp((this.player.cd[i] - this.t) / mv.cooldown, 0, 1);
       if (cdLeft > 0) g.fillStyle(0x000000, 0.55).fillRect(x, 576 + 56 * (1 - cdLeft), 140, 56 * cdLeft);
-      if (pm.energy < mv.cost) g.fillStyle(0x7a1f1f, 0.45).fillRect(x, 576, 140, 56);
+      if (pm.energy < mv.cost || pm.pp[i] <= 0) g.fillStyle(0x7a1f1f, 0.45).fillRect(x, 576, 140, 56);
+      this.moveTexts[i][2].setText(`⚡${mv.cost}  PP ${pm.pp[i]}/${maxUses(mv)}`)
+        .setColor(pm.pp[i] <= 0 ? '#ff8888' : '#9fb8a6');
     });
   }
 
