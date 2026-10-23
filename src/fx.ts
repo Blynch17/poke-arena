@@ -16,25 +16,37 @@ const PAL: Record<string, number[]> = {
   psy: [0xffd1ec, 0xff8fcf, 0xff5cae, 0xb43f8a],
   shadow: [0x9a6fd0, 0x6b3fa0, 0x3a1f5c, 0x1b0f2e],
   hit: [0xffffff, 0xfff3a8, 0xffd23f],
+  fairy: [0xffffff, 0xffd1ec, 0xf4a0c0, 0xd070a0],
+  steel: [0xffffff, 0xd8dcea, 0xaab0c8, 0x6a7088],
+  earth: [0xe0c68a, 0xc09a5a, 0xa07840, 0x6a4a28],
+  rock: [0xd0d4de, 0xa0a6b4, 0x7a808c, 0x555a66],
+  bug: [0xe8f4a0, 0xc8e038, 0x90b020, 0x506010],
+  dark: [0x9a6a8a, 0x6a3a5a, 0x3a1f3a, 0x1a1020],
+  dragon: [0xffffff, 0xb08cff, 0x7a45f8, 0x3a2a8a],
+  punch: [0xffffff, 0xffd23f, 0xff8c1a, 0xd9411e],
 };
 
 const PAL_OF: Record<string, string> = {
   ember: 'fire', flame: 'fire', water: 'water', hydro: 'water', ice: 'ice', leaf: 'leaf', solar: 'sun',
   sludge: 'sludge', spark: 'elec', bolt: 'elec', thunder: 'elec', psy: 'psy', psychic: 'psy',
   shadow: 'shadow', wing: 'hit', lick: 'hit', slam: 'hit',
+  blizzard: 'ice', fairy: 'fairy', steel: 'steel', earth: 'earth', rock: 'rock', bug: 'bug', dark: 'dark', dragon: 'dragon', punch: 'punch',
 };
 
 export const HEAD_TEXTURE: Record<string, string> = {
   ember: 'head-fire', flame: 'head-fire', water: 'head-water', hydro: 'head-water', ice: 'head-ice',
   leaf: 'head-leaf', solar: 'head-sun', sludge: 'head-sludge', spark: 'head-spark', bolt: 'head-spark',
   thunder: 'head-spark', psy: 'head-psy', psychic: 'head-psy', shadow: 'head-shadow',
+  fairy: 'head-fairy', steel: 'head-steel', earth: 'head-earth', rock: 'head-rock', bug: 'head-bug', dark: 'head-dark',
 };
 
 // Ataques que se dibujan como un chorro continuo desde el Pokémon (ver Fx.stream).
-export const STREAM_FX = new Set(['hydro', 'flame', 'solar']);
+export const STREAM_FX = new Set(['hydro', 'flame', 'solar', 'dragon', 'blizzard']);
 
 // Giro de la cabeza del proyectil, en rad/s.
-export const SPIN: Record<string, number> = { leaf: 7, ice: 3, spark: 9, bolt: 6, thunder: 6, psy: 4, psychic: 4, solar: 2 };
+export const SPIN: Record<string, number> = {
+  leaf: 7, ice: 3, spark: 9, bolt: 6, thunder: 6, psy: 4, psychic: 4, solar: 2, fairy: 5, rock: 6, steel: 4, bug: 8,
+};
 
 // ---------- sprites de las cabezas (pixel art dibujado con texto) ----------
 
@@ -90,6 +102,32 @@ const ART: Record<string, Art> = {
     rows: [
       '...ppp...', '..pwwwp..', '.pwppppp.', '.pwpppqp.', '.pppppqp.', '..pqqqp..', '...ppp...',
     ],
+  },
+  'head-fairy': {
+    pal: { p: 0xf4a0c0, w: 0xffffff, q: 0xd070a0 },
+    rows: ['...ppp...', '..pwwwp..', '.pwwwwwp.', '.pwwwwwq.', '..pwwwq..', '...qqq...'],
+  },
+  'head-steel': {
+    pal: { g: 0x8a90a8, l: 0xc8ccd8, w: 0xffffff, d: 0x5a6078 },
+    rows: [
+      '...gggg...', '..glllld..', '.glwwlldd.', '.glwllldd.', '.glllllld.', '.gllllldd.', '..gddddd..', '...gggg...',
+    ],
+  },
+  'head-earth': {
+    pal: { b: 0xa07840, l: 0xd0a868, d: 0x6a4a28 },
+    rows: ['..bbbb..', '.bllbbb.', 'bllbbbdb', 'bllbbbdb', '.bbbbddb', '..bbddd.'],
+  },
+  'head-rock': {
+    pal: { g: 0x8c929c, l: 0xc0c6d0, d: 0x5a6068 },
+    rows: ['..gg.gg...', '.glggllgg.', 'glllggdgg.', 'gllggggdg.', '.ggggdddg.', '..gddddg..'],
+  },
+  'head-bug': {
+    pal: { y: 0xb8d820, o: 0x303a10, w: 0xe8f4a0 },
+    rows: ['w.....w', '.w.y.w.', '..yyy..', '.yyoyy.', '..yyy..', '.w...w.'],
+  },
+  'head-dark': {
+    pal: { r: 0x8a2a40, k: 0x1a1020, v: 0x4a2a6a },
+    rows: ['...rrr...', '..rkkkr..', '.rkvvvkr.', '.rkvvvkr.', '..rkkkr..', '...rrr...'],
   },
   'head-shadow': {
     pal: { p: 0x9a6fd0, d: 0x3a1f5c, k: 0x1b0f2e },
@@ -337,6 +375,35 @@ export class Fx {
         }
         break;
       }
+      case 'fairy':
+        for (let i = count(1.6); i > 0; i--)
+          this.spawn(bx + rnd(10), by + rnd(10), { vx: rnd(30), vy: rnd(30), life: 520, s0: 8, s1: 0, spin: 4, colors: PAL.fairy });
+        if (every(100)) this.ring(x, y, 0xf4a0c0, 6, 28, 340);
+        break;
+      case 'steel':
+        for (let i = count(1.4); i > 0; i--)
+          this.spawn(bx + rnd(6), by + rnd(6), { vx: -dx * 60 + rnd(50), vy: -dy * 60 + rnd(50), life: 260, s0: 5, s1: 1, colors: PAL.steel });
+        this.spawn(x - dx * 18, y - dy * 18, { life: 140, s0: 4, len: 26, rot: Math.atan2(dy, dx), colors: [0xffffff], a0: 0.8 });
+        break;
+      case 'earth':
+        for (let i = count(1.8); i > 0; i--)
+          this.spawn(bx + rnd(8), by + rnd(8), { vx: rnd(60), vy: -40 + rnd(40), life: 560, s0: 10, s1: 4, g: 420, colors: PAL.earth });
+        for (let i = count(0.5); i > 0; i--)
+          this.spawn(bx, by + 8, { vx: -dx * 20, vy: -10, life: 520, s0: 18, s1: 30, a0: 0.5, colors: [0xc0a070] });
+        break;
+      case 'rock':
+        for (let i = count(1.3); i > 0; i--)
+          this.spawn(bx + rnd(6), by + rnd(6), { vx: rnd(60), vy: rnd(40), life: 480, s0: 7, s1: 3, g: 300, spin: 6, colors: PAL.rock });
+        break;
+      case 'bug':
+        for (let i = count(2.2); i > 0; i--)
+          this.spawn(x + rnd(18), y + rnd(18), { vx: rnd(140), vy: rnd(140), life: 260, s0: 4, s1: 2, colors: PAL.bug });
+        break;
+      case 'dark':
+        if (every(110)) this.ring(x, y, 0x8a2a40, 8, 36, 400, 4);
+        for (let i = count(1.8); i > 0; i--)
+          this.spawn(bx + rnd(10), by + rnd(10), { vx: rnd(40), vy: -20 + rnd(30), life: 520, s0: 14, s1: 3, a0: 0.9, colors: PAL.dark });
+        break;
       case 'shadow':
         for (let i = count(1.8); i > 0; i--)
           this.spawn(bx + rnd(10), by + rnd(10), { vx: rnd(40), vy: -20 + rnd(30), life: 520, s0: 16, s1: 4, a0: 0.9, colors: PAL.shadow });
@@ -366,6 +433,8 @@ export class Fx {
     const layers: [number, number, number][] =
       kind === 'hydro' ? [[1, 0x2f7fe0, 0.95], [0.78, 0x66b8ff, 1], [0.5, 0xbfe6ff, 1], [0.2, 0xffffff, 1]]
       : kind === 'flame' ? [[1, 0xd9411e, 0.9], [0.78, 0xff8c1a, 1], [0.52, 0xffd23f, 1], [0.26, 0xfff3a8, 1]]
+      : kind === 'blizzard' ? [[1, 0x4aa3c7, 0.92], [0.78, 0x8ae6ff, 1], [0.52, 0xd8f6ff, 1], [0.26, 0xffffff, 1]]
+      : kind === 'dragon' ? [[1, 0x3a2a8a, 0.92], [0.78, 0x7a45f8, 1], [0.52, 0xb08cff, 1], [0.26, 0xffffff, 1]]
       : [[1.35, 0xa6e64a, 0.35], [1, 0xffd23f, 0.95], [0.62, 0xfff3a8, 1], [0.3, 0xffffff, 1]];
 
     const n = Math.max(2, Math.floor(L / 6));
@@ -377,6 +446,8 @@ export class Fx {
       let w: number, off = 0, rise = 0;
       if (kind === 'hydro') { w = (34 + 64 * Math.pow(p, 0.7)) * sc; off = Math.sin(age * 0.018 + p * 9) * 5; }
       else if (kind === 'flame') { w = (22 + 86 * Math.pow(p, 0.8)) * sc; off = rnd(5); rise = p * 10; }
+      else if (kind === 'blizzard') { w = (30 + 74 * Math.pow(p, 0.75)) * sc; off = Math.sin(age * 0.016 + p * 10) * 7; }
+      else if (kind === 'dragon') { w = (26 + 80 * Math.pow(p, 0.8)) * sc; off = Math.sin(age * 0.02 + p * 11) * 6 + rnd(3); }
       else { w = (62 + 8 * Math.sin(age * 0.03 + p * 8)) * sc; }
       const c = at(u, off);
       blocks.push({ x: c.x, y: c.y - rise, w, f: 0.9 + Math.random() * 0.2 });
@@ -411,6 +482,20 @@ export class Fx {
         this.spawn(c.x, c.y, { vx: rnd(50), vy: -40 + rnd(40), life: 480, s0: 16, s1: 2, colors: FIRE, a0: 0.95 });
       }
       this.spawn(tip.x + rnd(14), tip.y + rnd(14), { vx: dx * 70 + rnd(60), vy: -30 + rnd(40), life: 520, s0: 30, s1: 6, colors: FIRE, a0: 0.9 });
+    } else if (kind === 'blizzard') {
+      for (let i = 0; i < 6; i++) { // nieve y cristales que se desprenden del chorro
+        const c = at(Math.random(), rnd(24));
+        this.spawn(c.x, c.y, { vx: rnd(70), vy: rnd(40) + 20, life: 520, s0: 8, s1: 0, g: 80, spin: 5, colors: PAL.ice });
+      }
+      this.spawn(tip.x + rnd(14), tip.y + rnd(14), { vx: dx * 60 + rnd(70), vy: rnd(70), life: 500, s0: 24, s1: 4, colors: PAL.ice, a0: 0.9 });
+      if (Math.floor((age + 16) / 150) !== Math.floor(age / 150)) this.ring(tip.x, tip.y, 0xd8f6ff, 10, 48, 320);
+    } else if (kind === 'dragon') {
+      for (let i = 0; i < 6; i++) {
+        const c = at(Math.random(), rnd(18));
+        this.spawn(c.x, c.y, { vx: rnd(60), vy: rnd(60), life: 480, s0: 14, s1: 2, colors: PAL.dragon, a0: 0.95 });
+      }
+      this.spawn(tip.x + rnd(14), tip.y + rnd(14), { vx: dx * 70 + rnd(60), vy: rnd(60), life: 520, s0: 30, s1: 6, colors: PAL.dragon, a0: 0.9 });
+      if (Math.floor((age + 16) / 160) !== Math.floor(age / 160)) this.ring(tip.x, tip.y, 0x7a45f8, 10, 50, 340);
     } else {
       g.fillStyle(0xffd23f, 0.5 * fade).fillCircle(x1, y1, 26 + 4 * Math.sin(age * 0.04));
       g.fillStyle(0xffffff, 0.8 * fade).fillCircle(x1, y1, 14);
@@ -459,6 +544,25 @@ export class Fx {
         this.ring(x, y, 0xff5cae, 8, 58, 420, 4); this.ring(x, y, 0xffd1ec, 4, 40, 340); this.ring(x, y, 0xb43f8a, 2, 26, 280);
         burst(12, 170, 8, 1, 540); break;
       case 'shadow': burst(12, 130, 14, 4, 660, -20); this.ring(x, y, 0x6b3fa0, 8, 46, 360); break;
+      case 'blizzard':
+        this.rays(x, y, 10, 44, 0xd8f6ff, 240); burst(18, 220, 10, 0, 600, 140, 8);
+        this.ring(x, y, 0xd8f6ff, 10, 66, 360); this.ring(x, y, 0x8ae6ff, 6, 44, 280); break;
+      case 'fairy':
+        this.rays(x, y, 8, 26, 0xffd1ec); burst(12, 170, 9, 0, 560, -40, 5);
+        this.ring(x, y, 0xf4a0c0, 8, 52, 380); this.ring(x, y, 0xffffff, 4, 32, 300); break;
+      case 'punch':
+        this.rays(x, y, 10, 40, 0xffd23f, 240); burst(8, 190, 8, 1, 360);
+        this.ring(x, y, 0xff8c1a, 8, 52, 280); this.ring(x, y, 0xffffff, 3, 30, 220); break;
+      case 'steel':
+        this.rays(x, y, 12, 46, 0xd8dcea, 260); burst(10, 230, 6, 1, 360);
+        this.ring(x, y, 0xaab0c8, 8, 48, 300); break;
+      case 'earth': burst(16, 200, 12, 3, 640, 520); this.ring(x, y, 0xc09a5a, 10, 58, 360); break;
+      case 'rock': burst(14, 210, 10, 3, 600, 560, 8); this.rays(x, y, 6, 30, 0xd0d4de); this.ring(x, y, 0xa0a6b4, 8, 44, 300); break;
+      case 'bug': burst(14, 150, 6, 1, 420); this.ring(x, y, 0xc8e038, 6, 38, 280); break;
+      case 'dark': burst(14, 140, 14, 3, 640, -20); this.ring(x, y, 0x8a2a40, 8, 56, 380, 4); this.ring(x, y, 0x1a1020, 4, 38, 300); break;
+      case 'dragon':
+        this.rays(x, y, 12, 50, 0xb08cff, 260); burst(16, 250, 14, 2, 600);
+        this.ring(x, y, 0x7a45f8, 10, 70, 380); this.ring(x, y, 0xffffff, 4, 42, 280); break;
       case 'wing': this.slash(x, y, ang, 0xe8f6ff, 46); this.rays(x, y, 8, 30, 0xffffff); break;
       case 'lick': this.rays(x, y, 6, 24, 0xff9fc0); burst(6, 120, 6, 1, 320); break;
       default: this.rays(x, y, 8, 36, 0xffffff); burst(8, 160, 8, 1, 380); this.ring(x, y, 0xffffff, 6, 44, 240); break;

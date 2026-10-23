@@ -241,6 +241,40 @@ class Sfx {
         this.tone(t + 0.1, 300, 520, 0.12, 'sine', 0.3);
         this.noise(t, 0.2, 'bandpass', 1500, 900, 0.3, 2);
         break;
+      case 'fairy': // destellos tintineantes que suben
+        [1200, 1600, 2000, 2600].forEach((f, i) => this.tone(t + i * 0.06, f, f * 1.04, 0.22, 'sine', 0.22));
+        this.tone(t, 600, 1800, 0.35, 'triangle', 0.16, 12);
+        break;
+      case 'punch': // puñetazo: silbido corto y golpe grave
+        this.noise(t, 0.12, 'bandpass', 600, 1700, 0.5, 1.2);
+        this.tone(t + 0.03, 170, 70, 0.12, 'sine', 0.5);
+        break;
+      case 'steel': // choque metálico: armónicos que no encajan y decaen rápido
+        this.tone(t, 1800, 1800, 0.3, 'square', 0.12);
+        this.tone(t, 2430, 2430, 0.26, 'sine', 0.2);
+        this.tone(t, 3100, 3100, 0.2, 'sine', 0.14);
+        this.noise(t, 0.05, 'highpass', 5000, 7000, 0.4);
+        break;
+      case 'earth': // retumbo con piedras que caen
+        this.noise(t, 0.7, 'lowpass', 450, 140, 0.8, 0.8);
+        this.tone(t, 75, 38, 0.7, 'sine', 0.6);
+        for (let i = 0; i < 6; i++) this.noise(t + rnd(0.1, 0.6), 0.05, 'lowpass', 1200, 400, 0.3);
+        break;
+      case 'rock': // golpe seco y chasquido de roca
+        this.tone(t, 130, 60, 0.2, 'sine', 0.55);
+        this.noise(t, 0.25, 'lowpass', 1600, 300, 0.6);
+        this.noise(t + 0.05, 0.04, 'highpass', 3500, 3000, 0.35);
+        break;
+      case 'dragon': // rugido: gruñido grave con aire por encima
+        this.tone(t, 150, 70, 0.9, 'sawtooth', 0.28, 10);
+        this.tone(t, 300, 100, 0.8, 'square', 0.12, 14);
+        this.noise(t, 0.9, 'lowpass', 600, 1800, 0.55, 0.8);
+        break;
+      case 'blizzard': // aullido de viento helado con cristales
+        this.noise(t, 1.0, 'bandpass', 900, 2600, 0.6, 1.5);
+        this.noise(t + 0.2, 0.7, 'highpass', 4000, 8000, 0.25);
+        [2200, 2900, 3500].forEach((f, i) => this.tone(t + i * 0.12, f, f, 0.2, 'sine', 0.15));
+        break;
       default: // 'slam' y cualquier otro: embestida seca
         this.noise(t, 0.2, 'bandpass', 700, 1800, 0.5, 1.2);
         this.tone(t, 200, 90, 0.12, 'sine', 0.35);
@@ -284,6 +318,11 @@ class Sfx {
         for (let i = 0; i < 3; i++) this.noise(t + i * 0.03, 0.04, 'highpass', 7000, 8000, 0.3);
         break;
       case 'psy': case 'psychic': this.tone(t, 900, 300, 0.25, 'sine', 0.25, 16); break;
+      case 'fairy': this.tone(t, 1800, 2200, 0.2, 'sine', 0.22); this.tone(t + 0.05, 2400, 2800, 0.18, 'sine', 0.15); break;
+      case 'steel': this.tone(t, 2000, 2000, 0.18, 'sine', 0.22); this.noise(t, 0.04, 'highpass', 6000, 7000, 0.3); break;
+      case 'earth': case 'rock': this.noise(t, 0.2, 'lowpass', 900, 250, 0.4); break;
+      case 'punch': this.tone(t, 140, 55, 0.15, 'sine', 0.45); break;
+      case 'dragon': this.tone(t, 120, 60, 0.35, 'sawtooth', 0.28); break;
       case 'shadow': this.tone(t, 110, 55, 0.3, 'sawtooth', 0.25); break;
       case 'leaf': this.noise(t, 0.12, 'bandpass', 2600, 1400, 0.3, 2); break;
       case 'sludge': this.tone(t, 250, 70, 0.2, 'sine', 0.35); break;

@@ -916,10 +916,13 @@ export class BattleScene extends Phaser.Scene {
       });
       return m.forced ? list : [...list, 'Atrás'];
     }
-    return [
-      ...(['potion', 'ether'] as ItemId[]).map((k) => `${ITEMS[k].name} x${this.inventory[k]}   ${ITEMS[k].desc}`),
-      'Atrás',
-    ];
+    if (m.screen === 'items') {
+      return [
+        ...(['potion', 'ether'] as ItemId[]).map((k) => `${ITEMS[k].name} x${this.inventory[k]}   ${ITEMS[k].desc}`),
+        'Atrás',
+      ];
+    }
+    return [];
   }
 
   private openMenu(screen: MenuScreen, forced = false) {
@@ -937,6 +940,7 @@ export class BattleScene extends Phaser.Scene {
   private renderMenu() {
     const m = this.menu;
     this.menuLayer.removeAll(true);
+    if (!this.paused || !m.screen) return; // sin menú abierto no hay nada que dibujar
     const opts = this.menuOptions();
     const h = 120 + opts.length * 40 + (m.screen === 'controls' ? 30 : 0);
     const y0 = 320 - h / 2;
@@ -982,7 +986,7 @@ export class BattleScene extends Phaser.Scene {
     const m = this.menu;
     const p = this.player;
     if (m.screen === 'main') {
-      if (i === 0) this.closeMenu();
+      if (i === 0) { this.closeMenu(); return; } // al cerrar no se vuelve a dibujar el menú
       else if (i === 1) { m.screen = 'team'; m.idx = p.active; m.msg = ''; }
       else if (i === 2) { m.screen = 'items'; m.idx = 0; m.msg = ''; }
       else if (i === 3) { m.screen = 'settings'; m.idx = 0; m.msg = ''; }

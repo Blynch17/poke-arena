@@ -2,8 +2,10 @@ import Phaser from 'phaser';
 import { POKEMON, TYPE_COLOR } from '../data';
 import { music } from '../music';
 import { sfx } from '../sfx';
+import { settings } from '../settings';
 
 const TEAM_SIZE = 3;
+const COLS = 4; // columnas de la cuadrícula; las filas se calculan según cuántos combatientes haya
 
 export class SelectScene extends Phaser.Scene {
   private cursor = 0;
@@ -28,17 +30,19 @@ export class SelectScene extends Phaser.Scene {
     this.add.text(480, 50, 'POKE ARENA', { fontSize: '44px', color: '#ffd23f', fontStyle: 'bold' }).setOrigin(0.5);
     this.add.text(480, 96, `Elige ${TEAM_SIZE} Pokémon (el primero es el que sale a pelear)`, { fontSize: '18px', color: '#cfe8cf' }).setOrigin(0.5);
 
+    const rows = Math.ceil(POKEMON.length / COLS);
     POKEMON.forEach((p, i) => {
-      const x = 180 + (i % 3) * 300;
-      const y = 230 + Math.floor(i / 3) * 210;
-      this.cards.push(this.add.rectangle(x, y, 250, 190, 0x24382a).setStrokeStyle(4, 0x3f5c48));
-      this.add.image(x, y - 14, `${p.id}-front`).setScale(1.5);
-      this.add.text(x, y + 62, p.name, { fontSize: '20px', color: '#fff' }).setOrigin(0.5);
+      const x = 480 + ((i % COLS) - (COLS - 1) / 2) * 225;
+      const y = 330 + (Math.floor(i / COLS) - (rows - 1) / 2) * 132;
+      this.cards.push(this.add.rectangle(x, y, 205, 124, 0x24382a).setStrokeStyle(4, 0x3f5c48));
+      this.add.image(x, y - 14, `${p.id}-front`).setScale(0.85);
+      this.add.text(x, y + 38, `${p.name}  #${p.dex}`, { fontSize: '16px', color: '#fff' }).setOrigin(0.5);
       p.types.forEach((t, k) => {
-        this.add.rectangle(x - 30 + k * 60, y + 86, 52, 14, TYPE_COLOR[t]);
-        this.add.text(x - 30 + k * 60, y + 86, t, { fontSize: '10px', color: '#000' }).setOrigin(0.5);
+        const tx = x + (k - (p.types.length - 1) / 2) * 58;
+        this.add.rectangle(tx, y + 55, 52, 13, TYPE_COLOR[t]);
+        this.add.text(tx, y + 55, t, { fontSize: '10px', color: '#000' }).setOrigin(0.5);
       });
-      this.badges.push(this.add.text(x - 112, y - 88, '', { fontSize: '26px', color: '#ffd23f', fontStyle: 'bold' }));
+      this.badges.push(this.add.text(x - 94, y - 58, '', { fontSize: '24px', color: '#ffd23f', fontStyle: 'bold' }));
     });
 
     this.info = this.add.text(480, 560, '', { fontSize: '16px', color: '#cfe8cf', align: 'center' }).setOrigin(0.5);
@@ -56,8 +60,8 @@ export class SelectScene extends Phaser.Scene {
     const n = POKEMON.length;
     if (e.key === 'ArrowRight') this.cursor = (this.cursor + 1) % n;
     else if (e.key === 'ArrowLeft') this.cursor = (this.cursor + n - 1) % n;
-    else if (e.key === 'ArrowDown') this.cursor = (this.cursor + 3) % n;
-    else if (e.key === 'ArrowUp') this.cursor = (this.cursor + n - 3) % n;
+    else if (e.key === 'ArrowDown') this.moveVertical(1);
+    else if (e.key === 'ArrowUp') this.moveVertical(-1);
     else if (e.key === 'Backspace') this.picks.pop();
     else if (e.key === 'Enter') {
       if (this.picks.length === TEAM_SIZE) {
@@ -67,6 +71,14 @@ export class SelectScene extends Phaser.Scene {
       if (!this.picks.includes(this.cursor)) this.picks.push(this.cursor);
     }
     this.refresh();
+  }
+
+  // Sube o baja una fila en la misma columna; si la última fila está incompleta, salta a la que tenga combatiente.
+  private moveVertical(dir: number) {
+    const n = POKEMON.length, rows = Math.ceil(n / COLS), col = this.cursor % COLS;
+    let r = Math.floor(this.cursor / COLS);
+    do r = (r + dir + rows) % rows; while (r * COLS + col >= n);
+    this.cursor = r * COLS + col;
   }
 
   private refresh() {
@@ -79,7 +91,7 @@ export class SelectScene extends Phaser.Scene {
     const st = p.stats;
     this.info.setText(
       `${p.name}  ·  PS ${p.maxHp}  Atq ${st.atk}  Def ${st.def}  AtqEsp ${st.spa}  DefEsp ${st.spd}  Vel ${st.spe}\n` +
-        p.moves.map((m, i) => `${'UIOP'[i]}: ${m.name}`).join('   '),
+        p.moves.map((m, i) => `${(settings.controls === 'keys' ? 'UIOP' : 'QWER')[i]}: ${m.name}`).join('   '),
     );
     this.hint.setText(
       this.picks.length === TEAM_SIZE

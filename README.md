@@ -14,6 +14,8 @@ Juego 2D de arena en tiempo real con Pokémon: te mueves libremente, lanzas ataq
 
 Menú de pausa: cambiar de Pokémon y usar objetos (Poción, Éter).
 
+Para sumar más combatientes, mira [docs/AGREGAR-POKEMON.md](docs/AGREGAR-POKEMON.md).
+
 ## Desarrollo
 
 ```bash

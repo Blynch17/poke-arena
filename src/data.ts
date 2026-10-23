@@ -1,6 +1,7 @@
 export type PType =
   | 'normal' | 'fire' | 'water' | 'grass' | 'electric'
-  | 'ice' | 'poison' | 'flying' | 'psychic' | 'ghost';
+  | 'ice' | 'poison' | 'flying' | 'psychic' | 'ghost'
+  | 'fighting' | 'ground' | 'rock' | 'bug' | 'dragon' | 'steel' | 'dark' | 'fairy';
 
 export type Category = 'physical' | 'special' | 'status';
 export type StatKey = 'atk' | 'def' | 'spa' | 'spd' | 'spe';
@@ -36,6 +37,7 @@ export interface Stats extends BaseStats {}
 export interface PokemonDef {
   id: string;
   name: string;
+  dex: number;         // número de Pokédex; la selección de equipo se ordena por él
   types: PType[];
   base: BaseStats;
   stats: Stats;    // stats calculados al nivel de combate
@@ -61,7 +63,8 @@ export const SPEED_STAGE_EFFECT = 0.3;
 export const TYPE_COLOR: Record<PType, number> = {
   normal: 0xd0d0c0, fire: 0xff7a1a, water: 0x3d9bff, grass: 0x4fd14f,
   electric: 0xffe135, ice: 0x8ae6ff, poison: 0xb45cd6, flying: 0xa9b9ff,
-  psychic: 0xff5cae, ghost: 0x7a5cc9,
+  psychic: 0xff5cae, ghost: 0x7a5cc9, fighting: 0xd9533f, ground: 0xe0c068, rock: 0xb8a038,
+  bug: 0xa8c820, dragon: 0x7a45f8, steel: 0xb8bcd8, dark: 0x8a6a58, fairy: 0xf4a0c0,
 };
 
 export const STAT_NAME: Record<StatKey, string> = {
@@ -70,16 +73,24 @@ export const STAT_NAME: Record<StatKey, string> = {
 
 // Multiplicadores del atacante (fila) sobre el defensor (columna). Lo omitido es x1.
 const CHART: Partial<Record<PType, Partial<Record<PType, number>>>> = {
-  normal: { ghost: 0 },
-  fire: { grass: 2, ice: 2, fire: 0.5, water: 0.5 },
-  water: { fire: 2, water: 0.5, grass: 0.5 },
-  grass: { water: 2, fire: 0.5, grass: 0.5, poison: 0.5, flying: 0.5 },
-  electric: { water: 2, flying: 2, grass: 0.5, electric: 0.5 },
-  ice: { grass: 2, flying: 2, fire: 0.5, water: 0.5, ice: 0.5 },
-  poison: { grass: 2, poison: 0.5, ghost: 0.5 },
-  flying: { grass: 2, electric: 0.5 },
-  psychic: { poison: 2, psychic: 0.5 },
-  ghost: { ghost: 2, psychic: 2, normal: 0 },
+  normal: { rock: 0.5, steel: 0.5, ghost: 0 },
+  fire: { fire: 0.5, water: 0.5, grass: 2, ice: 2, bug: 2, rock: 0.5, dragon: 0.5, steel: 2 },
+  water: { fire: 2, water: 0.5, grass: 0.5, ground: 2, rock: 2, dragon: 0.5 },
+  electric: { water: 2, electric: 0.5, grass: 0.5, ground: 0, flying: 2, dragon: 0.5 },
+  grass: { fire: 0.5, water: 2, grass: 0.5, poison: 0.5, ground: 2, flying: 0.5, bug: 0.5, rock: 2, dragon: 0.5, steel: 0.5 },
+  ice: { fire: 0.5, water: 0.5, grass: 2, ice: 0.5, ground: 2, flying: 2, dragon: 2, steel: 0.5 },
+  fighting: { normal: 2, ice: 2, poison: 0.5, flying: 0.5, psychic: 0.5, bug: 0.5, rock: 2, ghost: 0, dark: 2, steel: 2, fairy: 0.5 },
+  poison: { grass: 2, poison: 0.5, ground: 0.5, rock: 0.5, ghost: 0.5, steel: 0, fairy: 2 },
+  ground: { fire: 2, electric: 2, grass: 0.5, poison: 2, flying: 0, bug: 0.5, rock: 2, steel: 2 },
+  flying: { electric: 0.5, grass: 2, fighting: 2, bug: 2, rock: 0.5, steel: 0.5 },
+  psychic: { fighting: 2, poison: 2, psychic: 0.5, dark: 0, steel: 0.5 },
+  bug: { fire: 0.5, grass: 2, fighting: 0.5, poison: 0.5, flying: 0.5, psychic: 2, ghost: 0.5, dark: 2, steel: 0.5, fairy: 0.5 },
+  rock: { fire: 2, ice: 2, fighting: 0.5, ground: 0.5, flying: 2, bug: 2, steel: 0.5 },
+  ghost: { normal: 0, psychic: 2, ghost: 2, dark: 0.5 },
+  dragon: { dragon: 2, steel: 0.5, fairy: 0 },
+  dark: { fighting: 0.5, psychic: 2, ghost: 2, dark: 0.5, fairy: 0.5 },
+  steel: { fire: 0.5, water: 0.5, electric: 0.5, ice: 2, rock: 2, steel: 0.5, fairy: 2 },
+  fairy: { fire: 0.5, fighting: 2, poison: 0.5, dragon: 2, dark: 2, steel: 0.5 },
 };
 
 export function effectiveness(move: PType, defender: PType[]): number {
@@ -153,7 +164,7 @@ export const STRUGGLE: Move = {
   speed: 460, life: 550, size: 1, typeless: true, recoil: true, fx: 'slam', style: 'dash', dash: 200,
 };
 
-type Raw = Omit<PokemonDef, 'stats' | 'maxHp' | 'speed'>;
+type Raw = Omit<PokemonDef, 'stats' | 'maxHp' | 'speed' | 'dex'>;
 
 const RAW: Raw[] = [
   {
@@ -216,12 +227,71 @@ const RAW: Raw[] = [
       st('Maquinación', 'psychic', 20, STATUS_COST, { spa: 2 }),
     ],
   },
+  {
+    id: 'wigglytuff', name: 'Wigglytuff', types: ['normal', 'fairy'],
+    base: { hp: 140, atk: 70, def: 45, spa: 85, spd: 50, spe: 45 },
+    moves: [
+      mv('Voz Cautivadora', 'fairy', 'special', 40, 15, 22, 1100, 520, 800, 0.8, 'fairy'),
+      mv('Golpe Cuerpo', 'normal', 'physical', 85, 15, 40, 2300, 0, 0, 1, 'slam', { style: 'dash', dash: 240 }),
+      mv('Fuerza Lunar', 'fairy', 'special', 95, 15, 43, 2600, 420, 1000, 1.3, 'fairy'),
+      st('Paz Mental', 'psychic', 20, STATUS_COST, { spa: 1, spd: 1 }),
+    ],
+  },
+  {
+    id: 'machamp', name: 'Machamp', types: ['fighting'],
+    base: { hp: 90, atk: 130, def: 80, spa: 65, spd: 85, spe: 55 },
+    moves: [
+      mv('Puño Bala', 'steel', 'physical', 40, 30, 22, 1100, 0, 0, 1, 'steel', { style: 'dash', dash: 200 }),
+      mv('Demolición', 'fighting', 'physical', 75, 15, 36, 2000, 0, 0, 1, 'punch', { style: 'dash', dash: 230 }),
+      mv('Puño Dinámico', 'fighting', 'physical', 100, 5, 46, 2800, 0, 0, 1, 'punch', { style: 'dash', dash: 260 }),
+      st('Corpulencia', 'fighting', 20, STATUS_COST, { atk: 1, def: 1 }),
+    ],
+  },
+  {
+    id: 'golem', name: 'Golem', types: ['rock', 'ground'],
+    base: { hp: 80, atk: 120, def: 130, spa: 55, spd: 65, spe: 45 },
+    moves: [
+      mv('Lanzarrocas', 'rock', 'physical', 50, 15, 26, 1300, 520, 800, 0.9, 'rock'),
+      mv('Avalancha', 'rock', 'physical', 75, 10, 36, 2000, 480, 900, 1.2, 'rock'),
+      mv('Terremoto', 'ground', 'physical', 100, 10, 46, 2800, 380, 1000, 1.4, 'earth'),
+      st('Defensa Férrea', 'steel', 15, STATUS_COST, { def: 2 }),
+    ],
+  },
+  {
+    id: 'lapras', name: 'Lapras', types: ['water', 'ice'],
+    base: { hp: 130, atk: 85, def: 80, spa: 85, spd: 95, spe: 60 },
+    moves: [
+      mv('Canto Helado', 'ice', 'physical', 40, 30, 22, 1000, 640, 700, 0.8, 'ice'),
+      mv('Surf', 'water', 'special', 90, 15, 42, 2500, 420, 1000, 1.3, 'hydro'),
+      mv('Rayo Hielo', 'ice', 'special', 90, 10, 42, 2500, 560, 900, 0.9, 'ice'),
+      mv('Ventisca', 'ice', 'special', 110, 5, 49, 3000, 420, 1000, 1.3, 'blizzard'),
+    ],
+  },
+  {
+    id: 'dragonite', name: 'Dragonite', types: ['dragon', 'flying'],
+    base: { hp: 91, atk: 134, def: 95, spa: 100, spd: 100, spe: 80 },
+    moves: [
+      mv('Ataque Ala', 'flying', 'physical', 60, 35, 31, 1700, 0, 0, 1, 'wing', { style: 'dash', dash: 230 }),
+      mv('Garra Dragón', 'dragon', 'physical', 80, 15, 38, 2200, 0, 0, 1, 'dragon', { style: 'dash', dash: 250 }),
+      mv('Pulso Dragón', 'dragon', 'special', 85, 10, 40, 2400, 420, 1000, 1.3, 'dragon'),
+      st('Danza Dragón', 'dragon', 20, STATUS_COST, { atk: 1, spe: 1 }),
+    ],
+  },
 ];
 
+// Números de Pokédex oficiales. Al sumar un combatiente, agrega también su número aquí.
+const DEX: Record<string, number> = {
+  venusaur: 3, charizard: 6, blastoise: 9, pikachu: 25, wigglytuff: 40, alakazam: 65, machamp: 68, golem: 76, gengar: 94, lapras: 131, dragonite: 149
+};
+
+/** Todos los combatientes, ordenados por número de Pokédex. */
 export const POKEMON: PokemonDef[] = RAW.map((r) => {
   const stats = computeStats(r.base);
-  return { ...r, stats, maxHp: stats.hp * HP_MULT, speed: Math.round(100 + stats.spe * 1.1) };
-});
+  return {
+    ...r, dex: DEX[r.id], stats,
+    maxHp: stats.hp * HP_MULT, speed: Math.round(100 + stats.spe * 1.1),
+  };
+}).sort((a, b) => a.dex - b.dex);
 
 // Las curaciones también se multiplican por HP_MULT (Poción original: 20 PS).
 export const ITEMS = {
