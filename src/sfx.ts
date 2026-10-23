@@ -333,6 +333,47 @@ class Sfx {
     }
   }
 
+  /** Lanzar la bola: silbido corto. */
+  throwBall(x?: number) {
+    const t = this.begin(x);
+    if (t === null) return;
+    this.noise(t, 0.22, 'bandpass', 700, 2200, 0.45, 1.5);
+    this.tone(t, 380, 760, 0.16, 'sine', 0.14);
+  }
+
+  /** El Pokémon entra en la bola: barrido agudo que se apaga. */
+  absorb(x?: number) {
+    const t = this.begin(x);
+    if (t === null) return;
+    this.tone(t, 1800, 300, 0.4, 'sine', 0.25, 10);
+    this.noise(t, 0.3, 'highpass', 3000, 7000, 0.25);
+  }
+
+  /** Cada sacudida de la bola: golpecito sordo con un clic encima. */
+  ballShake(x?: number) {
+    const t = this.begin(x);
+    if (t === null) return;
+    this.tone(t, 220, 120, 0.11, 'sine', 0.55);
+    this.noise(t, 0.03, 'highpass', 3500, 3000, 0.4);
+  }
+
+  /** Captura lograda: clic seco y arpegio alegre. */
+  captured(x?: number) {
+    const t = this.begin(x);
+    if (t === null) return;
+    this.noise(t, 0.03, 'highpass', 4000, 3500, 0.6);
+    [523, 659, 784, 1047].forEach((f, i) => this.tone(t + 0.12 + i * 0.1, f, f, 0.22, 'square', 0.16));
+    this.tone(t + 0.55, 1568, 1568, 0.5, 'sine', 0.22);
+  }
+
+  /** El Pokémon se libera: la bola se abre con un estallido. */
+  escaped(x?: number) {
+    const t = this.begin(x);
+    if (t === null) return;
+    this.noise(t, 0.2, 'bandpass', 900, 3500, 0.7, 1);
+    this.tone(t, 700, 180, 0.3, 'sawtooth', 0.2);
+  }
+
   /** Mejora de stats: arpegio ascendente. */
   boost(x?: number) {
     const t = this.begin(x);

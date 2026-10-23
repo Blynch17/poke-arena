@@ -34,12 +34,17 @@ export interface BaseStats {
 
 export interface Stats extends BaseStats {}
 
+/** Lo mínimo que hace falta de un combatiente para calcular daño: sus tipos, sus stats y su nivel. */
+export interface Fighter { types: PType[]; stats: Stats; level: number }
+
 export interface PokemonDef {
   id: string;
   name: string;
   dex: number;         // número de Pokédex; la selección de equipo se ordena por él
   types: PType[];
   base: BaseStats;
+  level: number;      // nivel con el que se calculan stats y daño por defecto
+  catchRate: number;  // índice de captura de la especie (3 a 255)
   stats: Stats;    // stats calculados al nivel de combate
   maxHp: number;   // PS en combate (stat de PS x HP_MULT)
   speed: number;   // px/s de movimiento con el stat de velocidad sin modificar
@@ -105,13 +110,19 @@ export const stageMult = (n: number) => (n >= 0 ? (2 + n) / 2 : 2 / (2 - n));
 /** Usos máximos de un ataque por combate: PP original ponderado por PP_FACTOR. */
 export const maxUses = (m: Move) => Math.max(PP_MIN, Math.round(m.pp * PP_FACTOR)) * PP_DOUBLE;
 
-// Stats del juego (IV 31, EV 0, naturaleza neutra).
-function computeStats(b: BaseStats): Stats {
-  const other = (v: number) => Math.floor(((2 * v + 31) * LEVEL) / 100) + 5;
+// Stats del juego a un nivel dado (IV 31, EV 0, naturaleza neutra).
+export function statsAt(b: BaseStats, level: number): Stats {
+  const other = (v: number) => Math.floor(((2 * v + 31) * level) / 100) + 5;
   return {
-    hp: Math.floor(((2 * b.hp + 31) * LEVEL) / 100) + LEVEL + 10,
+    hp: Math.floor(((2 * b.hp + 31) * level) / 100) + level + 10,
     atk: other(b.atk), def: other(b.def), spa: other(b.spa), spd: other(b.spd), spe: other(b.spe),
   };
+}
+
+/** Un combatiente concreto: la especie a un nivel, con sus stats y su vida máxima ya calculados. */
+export function makeCombatant(def: PokemonDef, level: number) {
+  const stats = statsAt(def.base, level);
+  return { level, stats, maxHp: stats.hp * HP_MULT };
 }
 
 export interface DamageResult { damage: number; eff: number; crit: boolean; stab: boolean }
@@ -122,7 +133,7 @@ export interface DamageResult { damage: number; eff: number; crit: boolean; stab
  * defensor. Con random=false devuelve el daño esperado (sin variación ni crítico), útil para la IA.
  */
 export function calcDamage(
-  att: PokemonDef, def: PokemonDef, move: Move, random = true,
+  att: Fighter, def: Fighter, move: Move, random = true,
   attStages: Stages = newStages(), defStages: Stages = newStages(),
 ): DamageResult {
   const physical = move.category === 'physical';
@@ -135,7 +146,7 @@ export function calcDamage(
   const D = Math.max(1, Math.floor(def.stats[dKey] * stageMult(dStage)));
   const eff = move.typeless ? 1 : effectiveness(move.type, def.types);
   const stab = !move.typeless && att.types.includes(move.type);
-  let dmg = Math.floor(Math.floor((Math.floor((2 * LEVEL) / 5) + 2) * move.power * A / D) / 50) + 2;
+  let dmg = Math.floor(Math.floor((Math.floor((2 * att.level) / 5) + 2) * move.power * A / D) / 50) + 2;
   if (crit) dmg = Math.floor(dmg * 1.5);
   if (random) dmg = Math.floor(dmg * (0.85 + Math.random() * 0.15));
   if (stab) dmg = Math.floor(dmg * 1.5);
@@ -164,7 +175,7 @@ export const STRUGGLE: Move = {
   speed: 460, life: 550, size: 1, typeless: true, recoil: true, fx: 'slam', style: 'dash', dash: 200,
 };
 
-type Raw = Omit<PokemonDef, 'stats' | 'maxHp' | 'speed' | 'dex'>;
+type Raw = Omit<PokemonDef, 'stats' | 'maxHp' | 'speed' | 'dex' | 'level' | 'catchRate'>;
 
 const RAW: Raw[] = [
   {
@@ -284,11 +295,17 @@ const DEX: Record<string, number> = {
   venusaur: 3, charizard: 6, blastoise: 9, pikachu: 25, wigglytuff: 40, alakazam: 65, machamp: 68, golem: 76, gengar: 94, lapras: 131, dragonite: 149
 };
 
+// Índice de captura de cada especie (verificado en Pokémon Database). Si falta, se usa 45, el más común.
+const CATCH: Record<string, number> = {
+  venusaur: 45, charizard: 45, blastoise: 45, pikachu: 190, wigglytuff: 50, alakazam: 50,
+  machamp: 45, golem: 45, gengar: 45, lapras: 45, dragonite: 45,
+};
+
 /** Todos los combatientes, ordenados por número de Pokédex. */
 export const POKEMON: PokemonDef[] = RAW.map((r) => {
-  const stats = computeStats(r.base);
+  const stats = statsAt(r.base, LEVEL);
   return {
-    ...r, dex: DEX[r.id], stats,
+    ...r, dex: DEX[r.id], level: LEVEL, catchRate: CATCH[r.id] ?? 45, stats,
     maxHp: stats.hp * HP_MULT, speed: Math.round(100 + stats.spe * 1.1),
   };
 }).sort((a, b) => a.dex - b.dex);
@@ -299,3 +316,18 @@ export const ITEMS = {
   ether: { name: 'Éter', desc: '+60 Energía', hp: 0, energy: 60 },
 } as const;
 export type ItemId = keyof typeof ITEMS;
+
+// ---------- captura de Pokémon salvajes ----------
+
+/** Pokébolas: multiplicador de captura (la Master Ball captura siempre, sin usar la fórmula). */
+export const BALLS = {
+  poke: { name: 'Poké Ball', mult: 1, sure: false },
+  great: { name: 'Super Ball', mult: 1.5, sure: false },
+  ultra: { name: 'Ultra Ball', mult: 2, sure: false },
+  master: { name: 'Master Ball', mult: 1, sure: true },
+} as const;
+export type BallId = keyof typeof BALLS;
+
+/** Rango de niveles de los Pokémon salvajes. */
+export const WILD_LEVEL_MIN = 5;
+export const WILD_LEVEL_MAX = 60;

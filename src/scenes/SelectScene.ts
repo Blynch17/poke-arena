@@ -14,6 +14,8 @@ export class SelectScene extends Phaser.Scene {
   private badges: Phaser.GameObjects.Text[] = [];
   private info!: Phaser.GameObjects.Text;
   private hint!: Phaser.GameObjects.Text;
+  private modeText!: Phaser.GameObjects.Text;
+  private mode: 'arena' | 'wild' = 'arena'; // arena: contra un rival con equipo · wild: contra un Pokémon salvaje, con Pokébolas
 
   constructor() {
     super('Select');
@@ -23,13 +25,15 @@ export class SelectScene extends Phaser.Scene {
     music.play('select');
     this.cursor = 0;
     this.picks = [];
+    this.mode = 'arena';
     this.cards = [];
     this.badges = [];
-    this.input.keyboard!.addCapture('UP,DOWN,LEFT,RIGHT,ENTER,SPACE');
+    this.input.keyboard!.addCapture('UP,DOWN,LEFT,RIGHT,ENTER,SPACE,TAB');
 
     this.add.text(480, 50, 'POKE ARENA', { fontSize: '44px', color: '#ffd23f', fontStyle: 'bold' }).setOrigin(0.5);
     this.add.text(480, 96, `Elige ${TEAM_SIZE} Pokémon (el primero es el que sale a pelear)`, { fontSize: '18px', color: '#cfe8cf' }).setOrigin(0.5);
 
+    this.modeText = this.add.text(480, 124, '', { fontSize: '17px', color: '#ffd23f' }).setOrigin(0.5);
     const rows = Math.ceil(POKEMON.length / COLS);
     POKEMON.forEach((p, i) => {
       const x = 480 + ((i % COLS) - (COLS - 1) / 2) * 225;
@@ -62,10 +66,11 @@ export class SelectScene extends Phaser.Scene {
     else if (e.key === 'ArrowLeft') this.cursor = (this.cursor + n - 1) % n;
     else if (e.key === 'ArrowDown') this.moveVertical(1);
     else if (e.key === 'ArrowUp') this.moveVertical(-1);
+    else if (e.key === 'Tab') this.mode = this.mode === 'arena' ? 'wild' : 'arena';
     else if (e.key === 'Backspace') this.picks.pop();
     else if (e.key === 'Enter') {
       if (this.picks.length === TEAM_SIZE) {
-        this.scene.start('Battle', { team: this.picks });
+        this.scene.start('Battle', { team: this.picks, wild: this.mode === 'wild' });
         return;
       }
       if (!this.picks.includes(this.cursor)) this.picks.push(this.cursor);
@@ -82,6 +87,11 @@ export class SelectScene extends Phaser.Scene {
   }
 
   private refresh() {
+    this.modeText.setText(
+      this.mode === 'arena'
+        ? 'Modo: combate de arena   ·   TAB: cambiar a Pokémon salvaje'
+        : 'Modo: Pokémon salvaje (Poké Balls)   ·   TAB: cambiar a combate de arena',
+    );
     this.cards.forEach((c, i) => c.setStrokeStyle(4, i === this.cursor ? 0xffd23f : 0x3f5c48));
     this.badges.forEach((b, i) => {
       const k = this.picks.indexOf(i);

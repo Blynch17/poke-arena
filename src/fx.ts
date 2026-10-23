@@ -129,6 +129,13 @@ const ART: Record<string, Art> = {
     pal: { r: 0x8a2a40, k: 0x1a1020, v: 0x4a2a6a },
     rows: ['...rrr...', '..rkkkr..', '.rkvvvkr.', '.rkvvvkr.', '..rkkkr..', '...rrr...'],
   },
+  ball: {
+    pal: { t: 0x3a8fe0, h: 0x9fd0f8, k: 0x1b1520, b: 0xf4ecd8, s: 0xc9bfa0, w: 0xffffff },
+    rows: [
+      '...ttttt...', '..thhtttt..', '.thttttttt.', '.ttttttttt.', 'kkkkkkkkkkk', 'bbbbkwkbbbb',
+      'kkkkkkkkkkk', '.bbbbbbbbs.', '.bbbbbbbss.', '..bbbbbss..', '...bbbss...',
+    ],
+  },
   'head-shadow': {
     pal: { p: 0x9a6fd0, d: 0x3a1f5c, k: 0x1b0f2e },
     rows: [

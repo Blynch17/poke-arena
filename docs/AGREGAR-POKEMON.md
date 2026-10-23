@@ -79,6 +79,10 @@ vida del proyectil (ms), tamaño, efecto visual y, opcionalmente, `{ style: 'das
 
 Números de Pokédex para el objeto `DEX`: `wigglytuff: 40, machamp: 68, golem: 76, lapras: 131, dragonite: 149,`
 
+## 4. Índice de captura (opcional)
+Para que el Pokémon también pueda aparecer como salvaje con su dificultad real, agrega su índice de captura al objeto
+`CATCH` de `src/data.ts` (por ejemplo `machamp: 45,`). Si falta, se usa 45. Se consulta en Pokémon Database.
+
 ## Efectos visuales disponibles (último parámetro de `mv`)
 Proyectiles: `ember`, `water`, `ice`, `leaf`, `sludge`, `spark`, `psy`, `psychic`, `shadow`, `fairy`, `steel`, `earth`,
 `rock`, `bug`, `dark`. Chorros continuos: `hydro`, `flame`, `solar`, `dragon`, `blizzard`.

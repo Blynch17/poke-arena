@@ -1,8 +1,10 @@
 import Phaser from 'phaser';
 import {
-  POKEMON, PokemonDef, Move, Stages, StatKey, calcDamage, TYPE_COLOR, ITEMS, ItemId, ENERGY_MAX, ENERGY_REGEN,
+  POKEMON, PokemonDef, Move, Stages, Stats, Fighter, StatKey, calcDamage, TYPE_COLOR, ITEMS, ItemId, ENERGY_MAX, ENERGY_REGEN,
   STRUGGLE, newStages, stageMult, maxUses, STAT_NAME, STAGE_MAX, SPEED_STAGE_EFFECT,
+  BALLS, BallId, makeCombatant, WILD_LEVEL_MIN, WILD_LEVEL_MAX,
 } from '../data';
+import { catchX, captureChance, rollCapture } from '../capture';
 import { Fx, HEAD_TEXTURE, SPIN, STREAM_FX } from '../fx';
 import { music } from '../music';
 import { sfx } from '../sfx';
@@ -20,7 +22,13 @@ function walkRow(f: Phaser.Math.Vector2): number {
   return f.y >= 0 ? 0 : 1;
 }
 
-interface Member { def: PokemonDef; hp: number; energy: number; stages: Stages; pp: number[] }
+// Un combatiente en la batalla: la especie a un nivel, con sus stats y su vida máxima ya calculados.
+interface Member { def: PokemonDef; level: number; stats: Stats; maxHp: number; hp: number; energy: number; stages: Stages; pp: number[] }
+
+const fighter = (m: Member): Fighter => ({ types: m.def.types, stats: m.stats, level: m.level });
+
+// Pokébola lanzada contra el Pokémon salvaje.
+interface Thrown { img: Phaser.GameObjects.Image; vx: number; vy: number; id: BallId; dieAt: number }
 
 const STAT_SHORT: Record<StatKey, string> = { atk: 'Atq', def: 'Def', spa: 'AtE', spd: 'DeE', spe: 'Vel' };
 
@@ -63,7 +71,11 @@ interface Shot {
   stream?: { dx: number; dy: number; state: 'fly' | 'end'; endAt: number }; // chorro continuo
 }
 
-type MenuScreen = '' | 'main' | 'team' | 'items' | 'settings' | 'controls';
+type MenuScreen = '' | 'main' | 'team' | 'items' | 'balls' | 'settings' | 'controls';
+
+const MAIN_LABEL: Record<string, string> = {
+  resume: 'Continuar', team: 'Pokémon', items: 'Objetos', balls: 'Poké Balls', settings: 'Configuración', exit: 'Salir al menú de equipos',
+};
 
 export class BattleScene extends Phaser.Scene {
   private player!: Side;
@@ -74,6 +86,11 @@ export class BattleScene extends Phaser.Scene {
   private over = false;
   private keys!: Record<string, Phaser.Input.Keyboard.Key>;
   private inventory: Record<ItemId, number> = { potion: 3, ether: 3 };
+  private wild = false; // combate contra un Pokémon salvaje: se pueden lanzar Pokébolas
+  private balls: Record<BallId, number> = { poke: 10, great: 5, ultra: 3, master: 1 };
+  private armed: BallId | null = null; // bola elegida en el menú, lista para lanzar con ESPACIO
+  private thrown: Thrown[] = [];
+  private catching = false; // secuencia de captura en curso: el combate se congela
 
   private fx!: Fx;
   private hud!: Phaser.GameObjects.Graphics;
@@ -91,7 +108,7 @@ export class BattleScene extends Phaser.Scene {
 
   private ai = {
     nextFire: 1500, strafe: 1, strafeUntil: 0, aimErr: 0, aimUntil: 0,
-    dodgeUntil: 0, dodge: new Phaser.Math.Vector2(), ideal: 240, hist: [] as number[], waits: 0,
+    dodgeUntil: 0, dodge: new Phaser.Math.Vector2(), ideal: 210, closeAt: 0, hist: [] as number[], waits: 0,
     checkAt: 0, lastX: 0, lastY: 0, unstickUntil: 0, lastAct: 0,
   };
 
@@ -99,13 +116,18 @@ export class BattleScene extends Phaser.Scene {
     super('Battle');
   }
 
-  create(data: { team: number[] }) {
+  create(data: { team: number[]; wild?: boolean }) {
     this.shots = [];
     this.moveTexts = [];
     this.t = 0;
     this.paused = false;
     this.over = false;
     this.inventory = { potion: 3, ether: 3 };
+    this.wild = !!data.wild;
+    this.balls = { poke: 10, great: 5, ultra: 3, master: 1 };
+    this.armed = null;
+    this.thrown = [];
+    this.catching = false;
     this.enemySwapAt = 0;
     this.menu = { screen: '', idx: 0, forced: false, msg: '' };
     this.ai.nextFire = 1500;
@@ -114,6 +136,7 @@ export class BattleScene extends Phaser.Scene {
     this.ai.checkAt = 0;
     this.ai.unstickUntil = 0;
     this.ai.lastAct = 0;
+    this.ai.closeAt = 0;
     this.input.keyboard!.addCapture('UP,DOWN,LEFT,RIGHT,ENTER,SPACE');
 
     music.play('battle');
@@ -122,16 +145,22 @@ export class BattleScene extends Phaser.Scene {
     this.fx = new Fx(this);
 
     const mine = data.team.map((i) => POKEMON[i]);
-    const others = Phaser.Utils.Array.Shuffle([...POKEMON]).slice(0, 3);
     this.player = this.makeSide(true, mine, A.x + 160, A.y + A.h / 2);
-    this.enemy = this.makeSide(false, others, A.x + A.w - 160, A.y + A.h / 2);
+    if (this.wild) {
+      // Un solo Pokémon salvaje, de una especie y un nivel al azar.
+      const def = Phaser.Utils.Array.GetRandom(POKEMON) as PokemonDef;
+      this.enemy = this.makeSide(false, [def], A.x + A.w - 160, A.y + A.h / 2, [Phaser.Math.Between(WILD_LEVEL_MIN, WILD_LEVEL_MAX)]);
+    } else {
+      const others = Phaser.Utils.Array.Shuffle([...POKEMON]).slice(0, 3);
+      this.enemy = this.makeSide(false, others, A.x + A.w - 160, A.y + A.h / 2);
+    }
 
     this.hud = this.add.graphics().setDepth(50);
     this.buildHudTexts();
     this.refreshMoveTexts();
     this.menuLayer = this.add.container(0, 0).setDepth(100);
 
-    this.keys = this.input.keyboard!.addKeys('W,A,S,D,Q,E,R,U,I,O,P') as Record<string, Phaser.Input.Keyboard.Key>;
+    this.keys = this.input.keyboard!.addKeys('W,A,S,D,Q,E,R,U,I,O,P,SPACE') as Record<string, Phaser.Input.Keyboard.Key>;
     this.dest = null;
     this.pointerSeen = false;
     this.destMark = this.add.graphics().setDepth(4);
@@ -143,7 +172,8 @@ export class BattleScene extends Phaser.Scene {
       if (e.timeStamp >= born) this.onKey(e);
     });
 
-    this.toast('¡Comienza el combate!');
+    const foe = this.cur(this.enemy);
+    this.toast(this.wild ? `¡Apareció un ${foe.def.name} salvaje de nivel ${foe.level}!` : '¡Comienza el combate!');
   }
 
   // ---------- construcción ----------
@@ -160,10 +190,11 @@ export class BattleScene extends Phaser.Scene {
     g.lineStyle(6, 0xe8f2e8, 1).strokeRect(A.x, A.y, A.w, A.h);
   }
 
-  private makeSide(isPlayer: boolean, defs: PokemonDef[], x: number, y: number): Side {
-    const team: Member[] = defs.map((def) => ({
-      def, hp: def.maxHp, energy: ENERGY_MAX, stages: newStages(), pp: def.moves.map(maxUses),
-    }));
+  private makeSide(isPlayer: boolean, defs: PokemonDef[], x: number, y: number, levels: number[] = []): Side {
+    const team: Member[] = defs.map((def, i) => {
+      const c = makeCombatant(def, levels[i] ?? def.level);
+      return { def, ...c, hp: c.maxHp, energy: ENERGY_MAX, stages: newStages(), pp: def.moves.map(maxUses) };
+    });
     const facing = new Phaser.Math.Vector2(isPlayer ? 1 : -1, 0);
     const sprite = this.add.image(x, y, `${defs[0].id}-walk`, 0).setScale(SPRITE_SCALE).setDepth(10);
     const shadow = this.add.ellipse(x, y + 36, 60, 18, 0x000000, 0.3).setDepth(5);
@@ -182,7 +213,7 @@ export class BattleScene extends Phaser.Scene {
   // en los juegos deciden quién ataca primero; aquí un multiplicador completo se sentía demasiado rápido.
   private speedOf(s: Side): number {
     const m = this.cur(s);
-    const base = 100 + m.def.stats.spe * 1.1;
+    const base = 100 + m.stats.spe * 1.1;
     return Math.round(base * (1 + (stageMult(m.stages.spe) - 1) * SPEED_STAGE_EFFECT));
   }
 
@@ -190,7 +221,10 @@ export class BattleScene extends Phaser.Scene {
 
   update(_time: number, delta: number) {
     const dt = Math.min(delta, 50);
-    if (!this.paused && !this.over) {
+    if (this.catching) {
+      this.fx.beginFrame(); // durante la captura solo se animan los efectos
+      this.fx.update(dt);
+    } else if (!this.paused && !this.over) {
       this.t += dt;
       const s = dt / 1000;
       this.fx.beginFrame();
@@ -199,6 +233,7 @@ export class BattleScene extends Phaser.Scene {
       this.updateDashes();
       this.separate();
       this.updateShots(s);
+      this.updateBalls(s);
       this.regen(this.player, s);
       this.regen(this.enemy, s);
       if (this.enemy.down && this.enemySwapAt && this.t >= this.enemySwapAt) this.sendNextEnemy();
@@ -274,12 +309,118 @@ export class BattleScene extends Phaser.Scene {
     KEY_SETS[settings.controls].forEach((key, i) => {
       if (k[key].isDown) this.tryFire(p, i);
     });
+    if (this.armed && free && !p.dash && Phaser.Input.Keyboard.JustDown(k.SPACE)) this.throwBall();
+  }
+
+  // ---------- captura ----------
+
+  private wait(ms: number) {
+    return new Promise<void>((resolve) => this.time.delayedCall(ms, resolve));
+  }
+
+  // Lanza la bola elegida en el menú hacia donde se mira.
+  private throwBall() {
+    const id = this.armed!;
+    const p = this.player, f = p.facing;
+    this.armed = null;
+    this.balls[id]--;
+    const img = this.add.image(p.sprite.x + f.x * 40, p.sprite.y + f.y * 40, 'ball').setScale(1.1).setDepth(12);
+    this.thrown.push({ img, vx: f.x * 620, vy: f.y * 620, id, dieAt: this.t + 800 });
+    sfx.throwBall(p.sprite.x);
+  }
+
+  private updateBalls(s: number) {
+    const target = this.enemy;
+    for (let n = this.thrown.length - 1; n >= 0; n--) {
+      const b = this.thrown[n];
+      b.img.x += b.vx * s;
+      b.img.y += b.vy * s;
+      b.img.rotation += 14 * s;
+      const out = b.img.x < A.x || b.img.x > A.x + A.w || b.img.y < A.y || b.img.y > A.y + A.h;
+      if (!target.down && this.t >= target.invuln && Math.hypot(target.sprite.x - b.img.x, target.sprite.y - b.img.y) < R + 12) {
+        this.thrown.splice(n, 1);
+        void this.captureSequence(b);
+        return;
+      }
+      if (out || this.t > b.dieAt) {
+        this.floatText(Phaser.Math.Clamp(b.img.x, A.x + 40, A.x + A.w - 40), Phaser.Math.Clamp(b.img.y, A.y + 30, A.y + A.h - 30), 'Fallaste...', '#cccccc');
+        b.img.destroy();
+        this.thrown.splice(n, 1);
+      }
+    }
+  }
+
+  // La bola golpea al Pokémon salvaje: la fórmula decide el resultado y se anima la secuencia completa.
+  private async captureSequence(b: Thrown) {
+    const e = this.enemy, mem = this.cur(e);
+    const x = catchX(mem.maxHp, mem.hp, mem.def.catchRate, b.id, mem.level);
+    const roll = rollCapture(x, b.id);
+    this.catching = true;
+    const ex = e.sprite.x, ey = e.sprite.y;
+    // 1) el Pokémon se vuelve luz y entra en la bola
+    sfx.absorb(ex);
+    e.sprite.setTint(0xffffff).setTintMode(Phaser.TintModes.FILL); // silueta blanca
+    e.shadow.setVisible(false);
+    e.arrow.setVisible(false);
+    e.aura.setVisible(false);
+    this.fx.ring(ex, ey, 0xffffff, 8, 56, 380);
+    this.tweens.add({ targets: e.sprite, scale: 0, duration: 380 });
+    b.img.setPosition(ex, ey - 6).setRotation(0);
+    await this.wait(480);
+    // 2) la bola cae al suelo y se sacude: una vez por cada comprobación que el Pokémon resiste (máx. 3 a la vista)
+    this.tweens.add({ targets: b.img, y: ey + 24, duration: 320, ease: 'Bounce.easeOut' });
+    await this.wait(620);
+    const wobbles = roll.success ? 3 : Math.min(roll.shakes, 3);
+    for (let i = 0; i < wobbles; i++) {
+      sfx.ballShake(ex);
+      this.tweens.add({ targets: b.img, rotation: { from: -0.35, to: 0.35 }, duration: 150, yoyo: true, onComplete: () => b.img.setRotation(0) });
+      await this.wait(800);
+    }
+    if (roll.success) {
+      sfx.captured(ex);
+      this.fx.impact('fairy', ex, ey + 20, 0);
+      this.toast(`¡Atrapaste a ${mem.def.name}!`);
+      await this.wait(900);
+      b.img.destroy();
+      this.finishCaptured(mem);
+      return;
+    }
+    // la bola se abre y el Pokémon vuelve a la arena
+    sfx.escaped(ex);
+    this.fx.impact('slam', ex, ey + 20, 0);
+    b.img.destroy();
+    e.sprite.clearTint().setTintMode(Phaser.TintModes.MULTIPLY);
+    e.shadow.setVisible(true);
+    e.arrow.setVisible(true);
+    this.tweens.add({ targets: e.sprite, scale: SPRITE_SCALE, duration: 220 });
+    const msgs = ['¡Se escapó al instante!', '¡Parecía que lo atrapabas!', '¡Casi lo atrapas!', '¡Por muy poco!'];
+    this.toast(msgs[Math.min(roll.shakes, 3)]);
+    await this.wait(300);
+    e.invuln = this.t + 800;
+    this.catching = false;
+  }
+
+  // Gancho para el futuro: cuando el juego tenga historia, aquí el Pokémon capturado se sumará al equipo.
+  // De momento no se guarda nada: solo termina la batalla.
+  private onCaptured(_mem: Member) { /* pendiente: agregar al equipo */ }
+
+  private finishCaptured(mem: Member) {
+    if (this.over) return;
+    this.over = true;
+    this.catching = false;
+    this.onCaptured(mem);
+    music.play('victory');
+    const bg = this.add.rectangle(480, 320, 960, 640, 0x000000, 0.6).setDepth(90);
+    const t1 = this.add.text(480, 250, '¡CAPTURADO!', { fontSize: '68px', color: '#7fc4ff', fontStyle: 'bold' }).setOrigin(0.5).setDepth(91);
+    const t2 = this.add.text(480, 320, `${mem.def.name}  Nv. ${mem.level}`, { fontSize: '30px', color: '#ffffff' }).setOrigin(0.5).setDepth(91);
+    const t3 = this.add.text(480, 380, 'ENTER para volver a elegir equipo', { fontSize: '22px', color: '#cfe8cf' }).setOrigin(0.5).setDepth(91);
+    this.menuLayer.add([bg, t1, t2, t3]);
   }
 
   // Clic izquierdo (o arrastrar con el botón apretado): fija el destino en la arena.
   private onPointer(ptr: Phaser.Input.Pointer) {
     this.pointerSeen = true;
-    if (settings.controls !== 'mouse' || this.paused || this.over || this.player.down) return;
+    if (settings.controls !== 'mouse' || this.paused || this.over || this.catching || this.player.down) return;
     if (!ptr.leftButtonDown()) return;
     if (ptr.worldX < A.x || ptr.worldX > A.x + A.w || ptr.worldY < A.y || ptr.worldY > A.y + A.h) return;
     this.dest = new Phaser.Math.Vector2(
@@ -491,13 +632,13 @@ export class BattleScene extends Phaser.Scene {
     owner: Side, att: Member, mv: Move, target: Side, px: number, py: number, dirx: number, diry: number, kbMul: number,
   ) {
     const mem = this.cur(target);
-    const { damage: dmg, eff, crit } = calcDamage(att.def, mem.def, mv, true, att.stages, mem.stages);
+    const { damage: dmg, eff, crit } = calcDamage(fighter(att), fighter(mem), mv, true, att.stages, mem.stages);
     mem.hp = Math.max(0, mem.hp - dmg);
 
     target.kb.add(new Phaser.Math.Vector2(dirx * 170 * kbMul, diry * 170 * kbMul));
 
     this.fx.impact(mv.fx ?? 'slam', px, py, Math.atan2(diry, dirx));
-    const strong = dmg >= target.team[target.active].def.maxHp * 0.1; // golpe fuerte
+    const strong = dmg >= target.team[target.active].maxHp * 0.1; // golpe fuerte
     if (strong) this.cameras.main.shake(110, 0.004);
     sfx.hit(mv.fx ?? 'slam', eff, crit, strong, target.sprite.x);
     target.sprite.setTint(0xff7777);
@@ -513,7 +654,7 @@ export class BattleScene extends Phaser.Scene {
     if (mem.hp <= 0) this.faint(target);
 
     if (mv.recoil && att.hp > 0) {
-      const back = Math.floor(att.def.maxHp / 4);
+      const back = Math.floor(att.maxHp / 4);
       att.hp = Math.max(0, att.hp - back);
       this.floatText(owner.sprite.x, owner.sprite.y - 50, `-${back} (retroceso)`, '#ff9d9d');
       if (att.hp <= 0 && this.cur(owner) === att && !owner.down) this.faint(owner);
@@ -603,7 +744,13 @@ export class BattleScene extends Phaser.Scene {
     const meleeR = memE.def.moves.reduce(
       (best, mv, i) => (mv.style && memE.pp[i] > 0 && this.t >= e.cd[i] - 800 ? Math.min(best, this.rangeOf(mv)) : best), 1e9);
     let ideal = meleeR < 1e9 ? Math.min(ai.ideal, meleeR * 0.7) : ai.ideal;
-    let margin = meleeR < 1e9 ? 20 : 60;
+    let margin = meleeR < 1e9 ? 20 : 35;
+    // Presión: si lleva un rato sin estar cerca del rival (porque este se queda lejos o quieto), la distancia que
+    // le gusta mantener se va acortando, hasta ir a buscarlo. Al llegar a su alcance vuelve a pelear con normalidad.
+    if (dist < 190) ai.closeAt = this.t;
+    const pressure = Phaser.Math.Clamp((this.t - ai.closeAt - 2000) / 4000, 0, 1);
+    ideal = Phaser.Math.Linear(ideal, 120, pressure);
+    margin = Phaser.Math.Linear(margin, 10, pressure);
     // Seguro contra cualquier estancamiento: si lleva más de 5 s sin lanzar nada, se acerca decididamente.
     if (this.t > 6000 && this.t - ai.lastAct > 5000 && !locked) { ideal = Math.min(ideal, 150); margin = 0; }
     // Empuje de las paredes: crece al acercarse, para que nunca se anule justo en un borde.
@@ -626,6 +773,12 @@ export class BattleScene extends Phaser.Scene {
         ai.strafe = sgn;
         ai.strafeUntil = this.t + 700;
       } else { mx = -nx; my = -ny; }
+    }
+    // Si dar vueltas en este sentido lo empujaría contra una pared, cambia de sentido en vez de quedarse pegado a ella.
+    const wallPush = Math.hypot(wx, wy);
+    if (wallPush > 0.8 && (-ny * ai.strafe * wx + nx * ai.strafe * wy) < -0.5 * wallPush) {
+      ai.strafe = -ai.strafe;
+      ai.strafeUntil = this.t + 1500;
     }
     mx += -ny * ai.strafe * 0.8;
     my += nx * ai.strafe * 0.8;
@@ -689,7 +842,7 @@ export class BattleScene extends Phaser.Scene {
     const inRange = (mv: Move) => dist <= this.rangeOf(mv) * 0.9;
     const ready = (i: number) => mem.pp[i] > 0 && this.t >= e.cd[i] && mem.energy >= moves[i].cost;
     const dmg = moves.map((mv) =>
-      mv.category === 'status' || !inRange(mv) ? 0 : calcDamage(mem.def, foe.def, mv, false, mem.stages, foe.stages).damage);
+      mv.category === 'status' || !inRange(mv) ? 0 : calcDamage(fighter(mem), fighter(foe), mv, false, mem.stages, foe.stages).damage);
 
     // Mejora de stats: lejos del rival, con energía de sobra y si aún tiene margen de subida.
     const boost = moves.findIndex((mv, i) =>
@@ -770,6 +923,7 @@ export class BattleScene extends Phaser.Scene {
   private buildHudTexts() {
     const st = (size: number, color = '#fff') => ({ fontSize: `${size}px`, color });
     this.hudTexts = {
+      ball: this.add.text(480, 16, '', st(14, '#7fc4ff')).setOrigin(0.5, 0).setDepth(51),
       pName: this.add.text(20, 8, '', st(20)).setDepth(51),
       pHp: this.add.text(330, 33, '', st(13)).setOrigin(1, 0).setDepth(51),
       eName: this.add.text(940, 8, '', st(20)).setOrigin(1, 0).setDepth(51),
@@ -811,7 +965,7 @@ export class BattleScene extends Phaser.Scene {
     const sides: [Side, number][] = [[this.player, 20], [this.enemy, 640]];
     for (const [side, x] of sides) {
       const m = this.cur(side);
-      const frac = m.hp / m.def.maxHp;
+      const frac = m.hp / m.maxHp;
       this.bar(x, 34, 300, 14, frac, frac > 0.5 ? 0x4fd14f : frac > 0.2 ? 0xffd23f : 0xe84a4a);
       const flash = side.isPlayer && this.t - this.noEnergyAt < 250;
       this.bar(x, 56, 300, 8, m.energy / ENERGY_MAX, flash ? 0xff4444 : 0x3d9bff);
@@ -822,10 +976,11 @@ export class BattleScene extends Phaser.Scene {
       });
     }
     const pm = this.cur(this.player), em = this.cur(this.enemy);
-    this.hudTexts.pName.setText(pm.def.name);
-    this.hudTexts.pHp.setText(`${Math.ceil(pm.hp)}/${pm.def.maxHp}`);
-    this.hudTexts.eName.setText(em.def.name);
-    this.hudTexts.eHp.setText(`${Math.ceil(em.hp)}/${em.def.maxHp}`);
+    this.hudTexts.pName.setText(`${pm.def.name}  Nv.${pm.level}`);
+    this.hudTexts.ball.setText(this.armed ? `${BALLS[this.armed].name} lista · ESPACIO para lanzar` : '');
+    this.hudTexts.pHp.setText(`${Math.ceil(pm.hp)}/${pm.maxHp}`);
+    this.hudTexts.eName.setText(`${this.wild ? 'Salvaje ' : ''}${em.def.name}  Nv.${em.level}`);
+    this.hudTexts.eHp.setText(`${Math.ceil(em.hp)}/${em.maxHp}`);
     const stagesLine = (m: Member) =>
       (Object.keys(m.stages) as StatKey[]).filter((k) => m.stages[k] !== 0)
         .map((k) => `${STAT_SHORT[k]} ${m.stages[k] > 0 ? '+' : ''}${m.stages[k]}`).join('  ');
@@ -864,6 +1019,7 @@ export class BattleScene extends Phaser.Scene {
       this.toast(music.isMuted ? 'Sonido desactivado (M)' : 'Sonido activado (M)');
       return;
     }
+    if (this.catching) return; // la secuencia de captura no se interrumpe
     if (this.over) {
       if (e.key === 'Enter') this.scene.start('Select');
       return;
@@ -884,15 +1040,30 @@ export class BattleScene extends Phaser.Scene {
       if (m.forced) return;
       if (m.screen === 'main') { this.closeMenu(); return; }
       if (m.screen === 'controls') { m.screen = 'settings'; m.idx = 2; m.msg = ''; }
-      else if (m.screen === 'settings') { m.screen = 'main'; m.idx = 3; m.msg = ''; }
+      else if (m.screen === 'settings') { m.screen = 'main'; m.idx = this.mainActions().indexOf('settings'); m.msg = ''; }
       else { m.screen = 'main'; m.idx = 0; m.msg = ''; }
     } else return;
     this.renderMenu();
   }
 
+  // Acciones del menú principal; "Poké Balls" solo existe frente a un Pokémon salvaje.
+  private mainActions(): string[] {
+    return ['resume', 'team', 'items', ...(this.wild ? ['balls'] : []), 'settings', 'exit'];
+  }
+
   private menuOptions(): string[] {
     const m = this.menu;
-    if (m.screen === 'main') return ['Continuar', 'Pokémon', 'Objetos', 'Configuración', 'Salir al menú de equipos'];
+    if (m.screen === 'main') return this.mainActions().map((a) => MAIN_LABEL[a]);
+    if (m.screen === 'balls') {
+      const e = this.cur(this.enemy);
+      return [
+        ...(Object.keys(BALLS) as BallId[]).map((id) => {
+          const pct = captureChance(catchX(e.maxHp, e.hp, e.def.catchRate, id, e.level), id) * 100;
+          return `${BALLS[id].name} x${this.balls[id]}   ${pct < 10 ? pct.toFixed(1) : Math.round(pct)}%`;
+        }),
+        'Atrás',
+      ];
+    }
     if (m.screen === 'settings') {
       const bar = (v: number) => `${'█'.repeat(v)}${'░'.repeat(10 - v)} ${v}`;
       return [
@@ -912,7 +1083,7 @@ export class BattleScene extends Phaser.Scene {
     if (m.screen === 'team') {
       const list = this.player.team.map((mem, i) => {
         const tag = mem.hp <= 0 ? '  (debilitado)' : i === this.player.active && !this.player.down ? '  (en combate)' : '';
-        return `${mem.def.name}   PS ${Math.ceil(mem.hp)}/${mem.def.maxHp}${tag}`;
+        return `${mem.def.name}   PS ${Math.ceil(mem.hp)}/${mem.maxHp}${tag}`;
       });
       return m.forced ? list : [...list, 'Atrás'];
     }
@@ -945,10 +1116,12 @@ export class BattleScene extends Phaser.Scene {
     const h = 120 + opts.length * 40 + (m.screen === 'controls' ? 30 : 0);
     const y0 = 320 - h / 2;
     const title = {
-      main: 'PAUSA', team: 'POKÉMON', items: 'OBJETOS', settings: 'CONFIGURACIÓN', controls: 'CONTROLES', '': '',
+      main: 'PAUSA', team: 'POKÉMON', items: 'OBJETOS', balls: 'POKÉ BALLS', settings: 'CONFIGURACIÓN', controls: 'CONTROLES', '': '',
     }[m.screen];
     const hint = m.screen === 'settings' ? '← → ajustar volumen · ENTER abrir · ESC volver'
-      : m.screen === 'controls' ? this.controlsHint(m.idx) : '↑ ↓ mover · ENTER aceptar · ESC volver';
+      : m.screen === 'controls' ? this.controlsHint(m.idx)
+      : m.screen === 'balls' ? 'ENTER elige la bola · el % es la probabilidad de captura ahora'
+      : '↑ ↓ mover · ENTER aceptar · ESC volver';
     const items: Phaser.GameObjects.GameObject[] = [
       this.add.rectangle(480, 320, 960, 640, 0x000000, 0.55),
       this.add.rectangle(480, 320, 580, h, 0x1b2a1e).setStrokeStyle(4, 0xffd23f),
@@ -986,14 +1159,26 @@ export class BattleScene extends Phaser.Scene {
     const m = this.menu;
     const p = this.player;
     if (m.screen === 'main') {
-      if (i === 0) { this.closeMenu(); return; } // al cerrar no se vuelve a dibujar el menú
-      else if (i === 1) { m.screen = 'team'; m.idx = p.active; m.msg = ''; }
-      else if (i === 2) { m.screen = 'items'; m.idx = 0; m.msg = ''; }
-      else if (i === 3) { m.screen = 'settings'; m.idx = 0; m.msg = ''; }
+      const act = this.mainActions()[i];
+      if (act === 'resume') { this.closeMenu(); return; } // al cerrar no se vuelve a dibujar el menú
+      else if (act === 'team') { m.screen = 'team'; m.idx = p.active; m.msg = ''; }
+      else if (act === 'items') { m.screen = 'items'; m.idx = 0; m.msg = ''; }
+      else if (act === 'balls') { m.screen = 'balls'; m.idx = 0; m.msg = ''; }
+      else if (act === 'settings') { m.screen = 'settings'; m.idx = 0; m.msg = ''; }
       else this.scene.start('Select');
+    } else if (m.screen === 'balls') {
+      const ids = Object.keys(BALLS) as BallId[];
+      if (i >= ids.length) { m.screen = 'main'; m.idx = 0; m.msg = ''; }
+      else if (this.balls[ids[i]] <= 0) m.msg = 'No te quedan.';
+      else {
+        this.armed = ids[i];
+        this.closeMenu();
+        this.toast(`${BALLS[ids[i]].name} lista: ESPACIO para lanzar`);
+        return;
+      }
     } else if (m.screen === 'settings') {
       if (i === 2) { m.screen = 'controls'; m.idx = settings.controls === 'keys' ? 0 : 1; m.msg = ''; }
-      else if (i === 3) { m.screen = 'main'; m.idx = 3; m.msg = ''; }
+      else if (i === 3) { m.screen = 'main'; m.idx = this.mainActions().indexOf('settings'); m.msg = ''; }
       else m.msg = 'Usa ← → para cambiar el volumen.';
     } else if (m.screen === 'controls') {
       if (i >= 2) { m.screen = 'settings'; m.idx = 2; m.msg = ''; }
@@ -1023,13 +1208,13 @@ export class BattleScene extends Phaser.Scene {
       else {
         const k = (['potion', 'ether'] as ItemId[])[i];
         const mem = this.cur(p);
-        const full = k === 'potion' ? mem.hp >= mem.def.maxHp : mem.energy >= ENERGY_MAX;
+        const full = k === 'potion' ? mem.hp >= mem.maxHp : mem.energy >= ENERGY_MAX;
         if (this.inventory[k] <= 0) m.msg = 'No te quedan.';
         else if (full) m.msg = 'No tendría efecto.';
         else {
           const hp0 = mem.hp, en0 = mem.energy;
           this.inventory[k]--;
-          mem.hp = Math.min(mem.def.maxHp, mem.hp + ITEMS[k].hp);
+          mem.hp = Math.min(mem.maxHp, mem.hp + ITEMS[k].hp);
           mem.energy = Math.min(ENERGY_MAX, mem.energy + ITEMS[k].energy);
           // Usar un objeto devuelve directamente a la batalla.
           this.closeMenu();
