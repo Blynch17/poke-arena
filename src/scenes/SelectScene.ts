@@ -1,5 +1,7 @@
 import Phaser from 'phaser';
 import { POKEMON, TYPE_COLOR } from '../data';
+import { music } from '../music';
+import { sfx } from '../sfx';
 
 const TEAM_SIZE = 3;
 
@@ -16,6 +18,7 @@ export class SelectScene extends Phaser.Scene {
   }
 
   create() {
+    music.play('select');
     this.cursor = 0;
     this.picks = [];
     this.cards = [];
@@ -49,6 +52,7 @@ export class SelectScene extends Phaser.Scene {
   }
 
   private onKey(e: KeyboardEvent) {
+    void sfx.preload(); // en cuanto hay una tecla, el audio está listo para cargar sonidos locales
     const n = POKEMON.length;
     if (e.key === 'ArrowRight') this.cursor = (this.cursor + 1) % n;
     else if (e.key === 'ArrowLeft') this.cursor = (this.cursor + n - 1) % n;

@@ -1,0 +1,20 @@
+Efectos de sonido del golpe recibido
+====================================
+
+Opción A, un solo archivo: hits.mp3 (o .ogg, .m4a, .wav)
+  Contiene 3 sonidos seguidos, separados por un breve silencio, en este orden:
+    1) golpe poco eficaz
+    2) golpe normal
+    3) golpe muy eficaz
+  El juego los separa solo, detectando los silencios. Si encuentra una cantidad distinta de 3, avisa en la
+  consola del navegador y usa los sonidos sintetizados.
+
+Opción B, un archivo por caso:
+  hit-weak.*     poco eficaz
+  hit-normal.*   normal
+  hit-super.*    muy eficaz
+
+Si hay archivos hit-*, tienen prioridad sobre hits. "No afecta" sigue usando el sonido sintetizado.
+
+Estos archivos NO se suben a GitHub (están en .gitignore). Usa solo audio que tengas derecho a usar.
+Tecla M dentro del juego: silencia o reactiva todo el sonido.

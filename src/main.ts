@@ -14,4 +14,5 @@ const game = new Phaser.Game({
   scene: [BootScene, SelectScene, BattleScene],
 });
 
-if (import.meta.env.DEV) (window as unknown as { __game: Phaser.Game }).__game = game;
+// En desarrollo (o compilando con VITE_EXPOSE_GAME=1) se expone el juego para depurarlo desde la consola.
+if (import.meta.env.DEV || import.meta.env.VITE_EXPOSE_GAME) (window as unknown as { __game: Phaser.Game }).__game = game;

@@ -4,10 +4,14 @@ import {
   STRUGGLE, newStages, stageMult, maxUses, STAT_NAME, STAGE_MAX, SPEED_STAGE_EFFECT,
 } from '../data';
 import { Fx, HEAD_TEXTURE, SPIN, STREAM_FX } from '../fx';
+import { music } from '../music';
+import { sfx } from '../sfx';
+import { settings, saveSettings } from '../settings';
 
 const A = { x: 20, y: 84, w: 920, h: 480 }; // arena
 const R = 30; // radio de colisión de los Pokémon
-const MOVE_KEYS = ['U', 'I', 'O', 'P'];
+// Teclas de ataque según el esquema de controles (ajustes).
+const KEY_SETS = { keys: ['U', 'I', 'O', 'P'], mouse: ['Q', 'W', 'E', 'R'] };
 const SPRITE_SCALE = 3; // los sprites de overworld miden 32x32
 
 // Hoja de caminata: 2 cuadros por fila; filas = abajo, arriba, izquierda, derecha.
@@ -59,7 +63,7 @@ interface Shot {
   stream?: { dx: number; dy: number; state: 'fly' | 'end'; endAt: number }; // chorro continuo
 }
 
-type MenuScreen = '' | 'main' | 'team' | 'items';
+type MenuScreen = '' | 'main' | 'team' | 'items' | 'settings' | 'controls';
 
 export class BattleScene extends Phaser.Scene {
   private player!: Side;
@@ -76,6 +80,9 @@ export class BattleScene extends Phaser.Scene {
   private hudTexts!: Record<string, Phaser.GameObjects.Text>;
   private moveTexts: Phaser.GameObjects.Text[][] = [];
   private noEnergyAt = -9999;
+  private dest: Phaser.Math.Vector2 | null = null; // destino del clic (controles con mouse)
+  private pointerSeen = false; // el cursor ya se movió sobre el juego
+  private destMark!: Phaser.GameObjects.Graphics;
   private noPpAt = -9999;
   private enemySwapAt = 0;
 
@@ -85,7 +92,7 @@ export class BattleScene extends Phaser.Scene {
   private ai = {
     nextFire: 1500, strafe: 1, strafeUntil: 0, aimErr: 0, aimUntil: 0,
     dodgeUntil: 0, dodge: new Phaser.Math.Vector2(), ideal: 240, hist: [] as number[], waits: 0,
-    checkAt: 0, lastX: 0, lastY: 0, unstickUntil: 0,
+    checkAt: 0, lastX: 0, lastY: 0, unstickUntil: 0, lastAct: 0,
   };
 
   constructor() {
@@ -106,8 +113,11 @@ export class BattleScene extends Phaser.Scene {
     this.ai.waits = 0;
     this.ai.checkAt = 0;
     this.ai.unstickUntil = 0;
+    this.ai.lastAct = 0;
     this.input.keyboard!.addCapture('UP,DOWN,LEFT,RIGHT,ENTER,SPACE');
 
+    music.play('battle');
+    void sfx.preload();
     this.drawArena();
     this.fx = new Fx(this);
 
@@ -121,7 +131,13 @@ export class BattleScene extends Phaser.Scene {
     this.refreshMoveTexts();
     this.menuLayer = this.add.container(0, 0).setDepth(100);
 
-    this.keys = this.input.keyboard!.addKeys('W,A,S,D,U,I,O,P') as Record<string, Phaser.Input.Keyboard.Key>;
+    this.keys = this.input.keyboard!.addKeys('W,A,S,D,Q,E,R,U,I,O,P') as Record<string, Phaser.Input.Keyboard.Key>;
+    this.dest = null;
+    this.pointerSeen = false;
+    this.destMark = this.add.graphics().setDepth(4);
+    this.input.on('pointerdown', (ptr: Phaser.Input.Pointer) => this.onPointer(ptr));
+    this.input.on('pointermove', (ptr: Phaser.Input.Pointer) => this.onPointer(ptr));
+    this.applyControlLabels();
     const born = performance.now(); // el Enter que inició la escena no debe contar
     this.input.keyboard!.on('keydown', (e: KeyboardEvent) => {
       if (e.timeStamp >= born) this.onKey(e);
@@ -224,21 +240,62 @@ export class BattleScene extends Phaser.Scene {
     const p = this.player;
     if (p.down) return;
     const k = this.keys;
-    const dir = new Phaser.Math.Vector2(
-      (k.D.isDown ? 1 : 0) - (k.A.isDown ? 1 : 0),
-      (k.S.isDown ? 1 : 0) - (k.W.isDown ? 1 : 0),
-    );
     let vx = 0, vy = 0;
-    if (dir.lengthSq() > 0 && this.t >= p.lockUntil) {
-      dir.normalize();
-      p.facing.copy(dir);
-      const sp = this.speedOf(p);
-      vx = dir.x * sp; vy = dir.y * sp;
+    const free = this.t >= p.lockUntil;
+    if (settings.controls === 'keys') {
+      // WASD: se camina y se apunta hacia donde se camina.
+      const dir = new Phaser.Math.Vector2(
+        (k.D.isDown ? 1 : 0) - (k.A.isDown ? 1 : 0),
+        (k.S.isDown ? 1 : 0) - (k.W.isDown ? 1 : 0),
+      );
+      if (dir.lengthSq() > 0 && free) {
+        dir.normalize();
+        p.facing.copy(dir);
+        const sp = this.speedOf(p);
+        vx = dir.x * sp; vy = dir.y * sp;
+      }
+    } else {
+      // Mouse: se camina hasta el punto del clic y se apunta siempre hacia el cursor.
+      const ptr = this.input.activePointer;
+      if (this.pointerSeen && free && !p.dash) {
+        const ax = ptr.worldX - p.sprite.x, ay = ptr.worldY - p.sprite.y;
+        if (Math.hypot(ax, ay) > 4) p.facing.set(ax, ay).normalize();
+      }
+      if (this.dest && free) {
+        const dx = this.dest.x - p.sprite.x, dy = this.dest.y - p.sprite.y, d = Math.hypot(dx, dy);
+        if (d < 5) this.dest = null;
+        else {
+          const sp = Math.min(this.speedOf(p), d / s); // no pasarse del punto
+          vx = (dx / d) * sp; vy = (dy / d) * sp;
+        }
+      }
     }
     this.move(p, vx, vy, s);
-    MOVE_KEYS.forEach((key, i) => {
+    KEY_SETS[settings.controls].forEach((key, i) => {
       if (k[key].isDown) this.tryFire(p, i);
     });
+  }
+
+  // Clic izquierdo (o arrastrar con el botón apretado): fija el destino en la arena.
+  private onPointer(ptr: Phaser.Input.Pointer) {
+    this.pointerSeen = true;
+    if (settings.controls !== 'mouse' || this.paused || this.over || this.player.down) return;
+    if (!ptr.leftButtonDown()) return;
+    if (ptr.worldX < A.x || ptr.worldX > A.x + A.w || ptr.worldY < A.y || ptr.worldY > A.y + A.h) return;
+    this.dest = new Phaser.Math.Vector2(
+      Phaser.Math.Clamp(ptr.worldX, A.x + R, A.x + A.w - R),
+      Phaser.Math.Clamp(ptr.worldY, A.y + R, A.y + A.h - R),
+    );
+  }
+
+  // Letras de los ataques y texto de ayuda según el esquema de controles.
+  private applyControlLabels() {
+    KEY_SETS[settings.controls].forEach((key, i) => this.moveTexts[i][0].setText(key));
+    this.hudTexts.help.setText(
+      settings.controls === 'keys'
+        ? 'WASD mover · UIOP atacar · ENTER menú'
+        : 'Clic mover · QWER atacar · ENTER menú',
+    );
   }
 
   // ---------- ataques ----------
@@ -262,13 +319,16 @@ export class BattleScene extends Phaser.Scene {
       return false;
     }
     m.energy -= mv.cost;
+    if (side === this.enemy) this.ai.lastAct = this.t;
     if (!struggle) m.pp[i]--;
     side.cd[ci] = this.t + mv.cooldown;
     if (struggle && side.isPlayer) this.floatText(side.sprite.x, side.sprite.y - 60, '¡Forcejeo!', '#ffb86b');
     if (mv.category === 'status') {
+      sfx.boost(side.sprite.x);
       this.applyBoost(side, m, mv);
       return true;
     }
+    sfx.cast(mv.fx ?? 'slam', side.sprite.x);
     if (mv.style === 'dash') { this.startDash(side, m, mv); return true; }
     if (mv.style === 'reach') { this.reachAttack(side, m, mv); return true; }
     const f = side.facing;
@@ -437,7 +497,9 @@ export class BattleScene extends Phaser.Scene {
     target.kb.add(new Phaser.Math.Vector2(dirx * 170 * kbMul, diry * 170 * kbMul));
 
     this.fx.impact(mv.fx ?? 'slam', px, py, Math.atan2(diry, dirx));
-    if (dmg >= target.team[target.active].def.maxHp * 0.1) this.cameras.main.shake(110, 0.004); // golpe fuerte
+    const strong = dmg >= target.team[target.active].def.maxHp * 0.1; // golpe fuerte
+    if (strong) this.cameras.main.shake(110, 0.004);
+    sfx.hit(mv.fx ?? 'slam', eff, crit, strong, target.sprite.x);
     target.sprite.setTint(0xff7777);
     this.time.delayedCall(110, () => target.sprite.clearTint());
 
@@ -462,6 +524,7 @@ export class BattleScene extends Phaser.Scene {
 
   private faint(side: Side) {
     side.down = true;
+    sfx.faint(side.sprite.x);
     side.dash = null;
     side.sprite.setVisible(false);
     side.shadow.setVisible(false);
@@ -504,6 +567,7 @@ export class BattleScene extends Phaser.Scene {
   private finish(victory: boolean) {
     if (this.over) return;
     this.over = true;
+    music.play(victory ? 'victory' : 'defeat');
     const bg = this.add.rectangle(480, 320, 960, 640, 0x000000, 0.6).setDepth(90);
     const t1 = this.add.text(480, 270, victory ? '¡VICTORIA!' : 'DERROTA', {
       fontSize: '72px', color: victory ? '#ffd23f' : '#ff6666', fontStyle: 'bold',
@@ -538,8 +602,10 @@ export class BattleScene extends Phaser.Scene {
     const memE = this.cur(e);
     const meleeR = memE.def.moves.reduce(
       (best, mv, i) => (mv.style && memE.pp[i] > 0 && this.t >= e.cd[i] - 800 ? Math.min(best, this.rangeOf(mv)) : best), 1e9);
-    const ideal = meleeR < 1e9 ? Math.min(ai.ideal, meleeR * 0.7) : ai.ideal;
-    const margin = meleeR < 1e9 ? 20 : 60;
+    let ideal = meleeR < 1e9 ? Math.min(ai.ideal, meleeR * 0.7) : ai.ideal;
+    let margin = meleeR < 1e9 ? 20 : 60;
+    // Seguro contra cualquier estancamiento: si lleva más de 5 s sin lanzar nada, se acerca decididamente.
+    if (this.t > 6000 && this.t - ai.lastAct > 5000 && !locked) { ideal = Math.min(ideal, 150); margin = 0; }
     // Empuje de las paredes: crece al acercarse, para que nunca se anule justo en un borde.
     const wallM = 130, cx = A.x + A.w / 2, cy = A.y + A.h / 2;
     const dl = e.sprite.x - A.x, dr = A.x + A.w - e.sprite.x, dtp = e.sprite.y - A.y, dbt = A.y + A.h - e.sprite.y;
@@ -676,6 +742,13 @@ export class BattleScene extends Phaser.Scene {
   // ---------- visuales ----------
 
   private updateVisuals() {
+    const dm = this.destMark;
+    dm.clear();
+    if (settings.controls === 'mouse' && this.dest && !this.player.down && !this.over) {
+      const r = 10 + 2 * Math.sin(this.t / 120);
+      dm.lineStyle(3, 0xffe066, 0.9).strokeCircle(this.dest.x, this.dest.y, r);
+      dm.fillStyle(0xffe066, 0.9).fillRect(this.dest.x - 2, this.dest.y - 2, 4, 4);
+    }
     for (const side of [this.player, this.enemy]) {
       if (side.down) continue;
       const f = side.facing;
@@ -711,7 +784,7 @@ export class BattleScene extends Phaser.Scene {
     for (let i = 0; i < 4; i++) {
       const x = 20 + i * 150;
       this.moveTexts.push([
-        this.add.text(x + 8, 578, MOVE_KEYS[i], { fontSize: '20px', color: '#ffd23f', fontStyle: 'bold' }).setDepth(51),
+        this.add.text(x + 8, 578, KEY_SETS[settings.controls][i], { fontSize: '20px', color: '#ffd23f', fontStyle: 'bold' }).setDepth(51),
         this.add.text(x + 32, 580, '', { fontSize: '14px', color: '#fff' }).setDepth(51),
         this.add.text(x + 32, 600, '', { fontSize: '12px', color: '#9fb8a6' }).setDepth(51),
       ]);
@@ -787,6 +860,10 @@ export class BattleScene extends Phaser.Scene {
   // ---------- menú de pausa ----------
 
   private onKey(e: KeyboardEvent) {
+    if (e.key === 'm' || e.key === 'M') { // el interruptor de la música está en music.ts
+      this.toast(music.isMuted ? 'Sonido desactivado (M)' : 'Sonido activado (M)');
+      return;
+    }
     if (this.over) {
       if (e.key === 'Enter') this.scene.start('Select');
       return;
@@ -799,18 +876,39 @@ export class BattleScene extends Phaser.Scene {
     const m = this.menu;
     if (e.key === 'ArrowDown') m.idx = (m.idx + 1) % opts.length;
     else if (e.key === 'ArrowUp') m.idx = (m.idx + opts.length - 1) % opts.length;
-    else if (e.key === 'Enter') { this.activate(m.idx); return; }
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      if (m.screen !== 'settings' || m.idx > 1) return;
+      this.adjustVolume(m.idx === 0 ? 'sfx' : 'music', e.key === 'ArrowRight' ? 1 : -1);
+    } else if (e.key === 'Enter') { this.activate(m.idx); return; }
     else if (e.key === 'Escape' || e.key === 'Backspace') {
       if (m.forced) return;
       if (m.screen === 'main') { this.closeMenu(); return; }
-      m.screen = 'main'; m.idx = 0; m.msg = '';
+      if (m.screen === 'controls') { m.screen = 'settings'; m.idx = 2; m.msg = ''; }
+      else if (m.screen === 'settings') { m.screen = 'main'; m.idx = 3; m.msg = ''; }
+      else { m.screen = 'main'; m.idx = 0; m.msg = ''; }
     } else return;
     this.renderMenu();
   }
 
   private menuOptions(): string[] {
     const m = this.menu;
-    if (m.screen === 'main') return ['Continuar', 'Pokémon', 'Objetos', 'Salir al menú de equipos'];
+    if (m.screen === 'main') return ['Continuar', 'Pokémon', 'Objetos', 'Configuración', 'Salir al menú de equipos'];
+    if (m.screen === 'settings') {
+      const bar = (v: number) => `${'█'.repeat(v)}${'░'.repeat(10 - v)} ${v}`;
+      return [
+        `Efectos   ${bar(settings.sfx)}`,
+        `Música    ${bar(settings.music)}`,
+        `Controles: ${settings.controls === 'keys' ? 'Teclado' : 'Mouse'}`,
+        'Atrás',
+      ];
+    }
+    if (m.screen === 'controls') {
+      return [
+        `${settings.controls === 'keys' ? '●' : '○'} Teclado: WASD + UIOP`,
+        `${settings.controls === 'mouse' ? '●' : '○'} Mouse: clic + QWER`,
+        'Atrás',
+      ];
+    }
     if (m.screen === 'team') {
       const list = this.player.team.map((mem, i) => {
         const tag = mem.hp <= 0 ? '  (debilitado)' : i === this.player.active && !this.player.down ? '  (en combate)' : '';
@@ -840,24 +938,44 @@ export class BattleScene extends Phaser.Scene {
     const m = this.menu;
     this.menuLayer.removeAll(true);
     const opts = this.menuOptions();
-    const h = 120 + opts.length * 40;
+    const h = 120 + opts.length * 40 + (m.screen === 'controls' ? 30 : 0);
     const y0 = 320 - h / 2;
-    const title = { main: 'PAUSA', team: 'POKÉMON', items: 'OBJETOS', '': '' }[m.screen];
+    const title = {
+      main: 'PAUSA', team: 'POKÉMON', items: 'OBJETOS', settings: 'CONFIGURACIÓN', controls: 'CONTROLES', '': '',
+    }[m.screen];
+    const hint = m.screen === 'settings' ? '← → ajustar volumen · ENTER abrir · ESC volver'
+      : m.screen === 'controls' ? this.controlsHint(m.idx) : '↑ ↓ mover · ENTER aceptar · ESC volver';
     const items: Phaser.GameObjects.GameObject[] = [
       this.add.rectangle(480, 320, 960, 640, 0x000000, 0.55),
-      this.add.rectangle(480, 320, 520, h, 0x1b2a1e).setStrokeStyle(4, 0xffd23f),
+      this.add.rectangle(480, 320, 580, h, 0x1b2a1e).setStrokeStyle(4, 0xffd23f),
       this.add.text(480, y0 + 26, title, { fontSize: '26px', color: '#ffd23f', fontStyle: 'bold' }).setOrigin(0.5),
     ];
     opts.forEach((o, i) => {
       const sel = i === m.idx;
-      items.push(this.add.text(250, y0 + 64 + i * 40, `${sel ? '▶ ' : '   '}${o}`, {
-        fontSize: '22px', color: sel ? '#ffffff' : '#9fb8a6', fontStyle: sel ? 'bold' : 'normal',
+      items.push(this.add.text(214, y0 + 64 + i * 40, `${sel ? '▶ ' : '  '}${o}`, {
+        fontSize: '22px', color: sel ? '#ffffff' : '#9fb8a6',
       }));
     });
-    items.push(this.add.text(480, y0 + h - 22, m.msg || '↑ ↓ mover · ENTER aceptar · ESC volver', {
-      fontSize: '15px', color: '#cfe8cf',
+    items.push(this.add.text(480, y0 + h - (m.screen === 'controls' ? 32 : 22), m.msg || hint, {
+      fontSize: '15px', color: '#cfe8cf', align: 'center', wordWrap: { width: 540 },
     }).setOrigin(0.5));
     this.menuLayer.add(items);
+  }
+
+  // Explicación de cada esquema de controles, según la opción resaltada.
+  private controlsHint(idx: number): string {
+    if (idx === 0) return 'Mover con W A S D y atacar con U I O P. El ataque sale hacia donde caminas.';
+    if (idx === 1) return 'Mover con clic izquierdo (mantén apretado para seguir al cursor) y atacar con Q W E R. El ataque sale hacia donde apunta el cursor.';
+    return 'ESC también vuelve.';
+  }
+
+  private adjustVolume(which: 'sfx' | 'music', delta: number) {
+    const v = Phaser.Math.Clamp(settings[which] + delta, 0, 10);
+    if (v === settings[which]) return;
+    settings[which] = v;
+    saveSettings();
+    music.applyVolumes();
+    if (which === 'sfx') sfx.hit('slam', 1, false, false); // muestra del nuevo volumen
   }
 
   private activate(i: number) {
@@ -867,7 +985,21 @@ export class BattleScene extends Phaser.Scene {
       if (i === 0) this.closeMenu();
       else if (i === 1) { m.screen = 'team'; m.idx = p.active; m.msg = ''; }
       else if (i === 2) { m.screen = 'items'; m.idx = 0; m.msg = ''; }
+      else if (i === 3) { m.screen = 'settings'; m.idx = 0; m.msg = ''; }
       else this.scene.start('Select');
+    } else if (m.screen === 'settings') {
+      if (i === 2) { m.screen = 'controls'; m.idx = settings.controls === 'keys' ? 0 : 1; m.msg = ''; }
+      else if (i === 3) { m.screen = 'main'; m.idx = 3; m.msg = ''; }
+      else m.msg = 'Usa ← → para cambiar el volumen.';
+    } else if (m.screen === 'controls') {
+      if (i >= 2) { m.screen = 'settings'; m.idx = 2; m.msg = ''; }
+      else {
+        settings.controls = i === 0 ? 'keys' : 'mouse';
+        saveSettings();
+        this.dest = null;
+        this.applyControlLabels();
+        m.msg = `Controles: ${i === 0 ? 'teclado' : 'mouse'}.`;
+      }
     } else if (m.screen === 'team') {
       if (i >= p.team.length) { m.screen = 'main'; m.idx = 0; m.msg = ''; } // el cursor queda en Continuar
       else if (p.team[i].hp <= 0) m.msg = 'Ese Pokémon está debilitado.';

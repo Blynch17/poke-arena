@@ -2,3 +2,17 @@ node_modules
 dist
 .DS_Store
 sprites-tcrf/
+
+# Música local (no se sube al repositorio)
+public/music/*.mp3
+public/music/*.ogg
+public/music/*.m4a
+public/music/*.wav
+public/music/*.flac
+
+# Efectos de sonido locales (no se suben al repositorio)
+public/sfx/*.mp3
+public/sfx/*.ogg
+public/sfx/*.m4a
+public/sfx/*.wav
+public/sfx/*.flac

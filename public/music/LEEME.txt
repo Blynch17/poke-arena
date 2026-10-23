@@ -1,0 +1,15 @@
+Música del juego
+================
+
+Si pones aquí un archivo con alguno de estos nombres, el juego lo reproduce en bucle en vez del tema
+sintetizado que trae por defecto:
+
+  select.*   pantalla de selección de equipo
+  battle.*   batalla
+  victory.*  victoria (suena una vez)
+  defeat.*   derrota (suena una vez)
+
+Formatos aceptados: mp3, ogg, m4a o wav (por ejemplo battle.mp3).
+
+Estos archivos NO se suben a GitHub (están en .gitignore). Usa solo música que tengas derecho a usar.
+Tecla M dentro del juego: activa o desactiva la música y los efectos de sonido.
