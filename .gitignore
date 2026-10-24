@@ -16,3 +16,4 @@ public/sfx/*.ogg
 public/sfx/*.m4a
 public/sfx/*.wav
 public/sfx/*.flac
+__pycache__/

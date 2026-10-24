@@ -7,7 +7,7 @@
 
 import { settings } from './settings';
 
-export type Track = 'select' | 'battle' | 'victory' | 'defeat';
+export type Track = 'select' | 'battle' | 'victory' | 'defeat' | 'world';
 
 // ---------- partituras ----------
 // Cada voz es una cadena de eventos separados por espacios: "A4:2" = La4 durante 2 pasos (semicorcheas),
@@ -57,7 +57,30 @@ const ROOT: Record<string, [string, string]> = {
   Am: ['A2', 'A3'], F: ['F2', 'F3'], G: ['G2', 'G3'], E: ['E2', 'E3'], Dm: ['D2', 'D3'], C: ['C3', 'C4'],
 };
 
+// Tema del camino: alegre y tranquilo, en Do mayor.
+const WORLD_PROG = ['C', 'Am', 'F', 'G', 'C', 'Am', 'F', 'G'];
+const WORLD_LEAD = bars(
+  'E5:2 G5:2 E5:2 C5:2 D5:2 E5:2 D5:2 C5:2',
+  'C5:2 E5:2 A5:2 E5:2 C5:2 E5:2 D5:4',
+  'A5:2 C6:2 A5:2 F5:2 G5:2 A5:2 G5:2 F5:2',
+  'D5:2 G5:2 B5:2 G5:2 D5:2 G5:4 .:2',
+  'E5:2 G5:2 C6:4 B5:2 A5:2 G5:2 E5:2',
+  'A5:2 E5:2 A5:2 C6:2 B5:2 A5:2 E5:4',
+  'F5:2 A5:2 C6:2 A5:2 G5:2 F5:2 E5:2 D5:2',
+  'D5:2 E5:2 G5:2 B5:2 C6:8',
+);
+const LIGHT_DRUMS = 'k . . . s . . . k . . . s . . .';
+
 const SONGS: Record<Track, SongDef> = {
+  world: {
+    bpm: 112, loop: true,
+    voices: [
+      { wave: 'pulse50', gain: 0.38, score: WORLD_LEAD },
+      { wave: 'pulse25', gain: 0.18, score: bars(...WORLD_PROG.map((c) => arp(CH[c]))) },
+      { wave: 'tri', gain: 0.6, score: bars(...WORLD_PROG.map((c) => bass(...ROOT[c]))) },
+      { wave: 'drums', gain: 0.3, score: bars(...WORLD_PROG.map(() => LIGHT_DRUMS)) },
+    ],
+  },
   battle: {
     bpm: 168, loop: true,
     voices: [

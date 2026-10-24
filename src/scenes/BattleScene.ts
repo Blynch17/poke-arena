@@ -91,6 +91,8 @@ export class BattleScene extends Phaser.Scene {
   private armed: BallId | null = null; // bola elegida en el menú, lista para lanzar con ESPACIO
   private thrown: Thrown[] = [];
   private catching = false; // secuencia de captura en curso: el combate se congela
+  private trainer: string | null = null; // combate contra un entrenador: no se puede huir ni capturar
+  private returnTo: Record<string, unknown> | null = null; // si viene del mundo, a dónde volver al terminar
 
   private fx!: Fx;
   private hud!: Phaser.GameObjects.Graphics;
@@ -116,7 +118,7 @@ export class BattleScene extends Phaser.Scene {
     super('Battle');
   }
 
-  create(data: { team: number[]; wild?: boolean }) {
+  create(data: { team: number[]; wild?: boolean; wildId?: string; wildLevel?: number; trainer?: string; returnTo?: Record<string, unknown> }) {
     this.shots = [];
     this.moveTexts = [];
     this.t = 0;
@@ -124,6 +126,8 @@ export class BattleScene extends Phaser.Scene {
     this.over = false;
     this.inventory = { potion: 3, ether: 3 };
     this.wild = !!data.wild;
+    this.returnTo = data.returnTo ?? null;
+    this.trainer = data.trainer ?? null;
     this.balls = { poke: 10, great: 5, ultra: 3, master: 1 };
     this.armed = null;
     this.thrown = [];
@@ -131,6 +135,12 @@ export class BattleScene extends Phaser.Scene {
     this.enemySwapAt = 0;
     this.menu = { screen: '', idx: 0, forced: false, msg: '' };
     this.ai.nextFire = 1500;
+    this.ai.strafeUntil = 0;   // los temporizadores de la IA usan this.t, que vuelve a 0: si no, quedan los del combate anterior
+    this.ai.aimUntil = 0;
+    this.ai.dodgeUntil = 0;
+    this.ai.dodge.set(0, 0);
+    this.ai.lastX = 0;
+    this.ai.lastY = 0;
     this.ai.hist = [];
     this.ai.waits = 0;
     this.ai.checkAt = 0;
@@ -148,8 +158,10 @@ export class BattleScene extends Phaser.Scene {
     this.player = this.makeSide(true, mine, A.x + 160, A.y + A.h / 2);
     if (this.wild) {
       // Un solo Pokémon salvaje, de una especie y un nivel al azar.
-      const def = Phaser.Utils.Array.GetRandom(POKEMON) as PokemonDef;
-      this.enemy = this.makeSide(false, [def], A.x + A.w - 160, A.y + A.h / 2, [Phaser.Math.Between(WILD_LEVEL_MIN, WILD_LEVEL_MAX)]);
+      // Si viene de la ruta, ya trae la especie y el nivel; si no, se elige al azar.
+      const def = POKEMON.find((p) => p.id === data.wildId) ?? (Phaser.Utils.Array.GetRandom(POKEMON) as PokemonDef);
+      const level = data.wildLevel ?? Phaser.Math.Between(WILD_LEVEL_MIN, WILD_LEVEL_MAX);
+      this.enemy = this.makeSide(false, [def], A.x + A.w - 160, A.y + A.h / 2, [level]);
     } else {
       const others = Phaser.Utils.Array.Shuffle([...POKEMON]).slice(0, 3);
       this.enemy = this.makeSide(false, others, A.x + A.w - 160, A.y + A.h / 2);
@@ -173,7 +185,7 @@ export class BattleScene extends Phaser.Scene {
     });
 
     const foe = this.cur(this.enemy);
-    this.toast(this.wild ? `¡Apareció un ${foe.def.name} salvaje de nivel ${foe.level}!` : '¡Comienza el combate!');
+    this.toast(this.wild ? `¡Apareció un ${foe.def.name} salvaje de nivel ${foe.level}!` : this.trainer ? `¡${this.trainer} te desafía!` : '¡Comienza el combate!');
   }
 
   // ---------- construcción ----------
@@ -413,7 +425,7 @@ export class BattleScene extends Phaser.Scene {
     const bg = this.add.rectangle(480, 320, 960, 640, 0x000000, 0.6).setDepth(90);
     const t1 = this.add.text(480, 250, '¡CAPTURADO!', { fontSize: '68px', color: '#7fc4ff', fontStyle: 'bold' }).setOrigin(0.5).setDepth(91);
     const t2 = this.add.text(480, 320, `${mem.def.name}  Nv. ${mem.level}`, { fontSize: '30px', color: '#ffffff' }).setOrigin(0.5).setDepth(91);
-    const t3 = this.add.text(480, 380, 'ENTER para volver a elegir equipo', { fontSize: '22px', color: '#cfe8cf' }).setOrigin(0.5).setDepth(91);
+    const t3 = this.add.text(480, 380, (this.returnTo ? 'ENTER para volver al camino' : 'ENTER para volver a elegir equipo'), { fontSize: '22px', color: '#cfe8cf' }).setOrigin(0.5).setDepth(91);
     this.menuLayer.add([bg, t1, t2, t3]);
   }
 
@@ -708,12 +720,13 @@ export class BattleScene extends Phaser.Scene {
   private finish(victory: boolean) {
     if (this.over) return;
     this.over = true;
+    if (this.returnTo) this.returnTo = { ...this.returnTo, result: victory ? 'win' : 'lose' };
     music.play(victory ? 'victory' : 'defeat');
     const bg = this.add.rectangle(480, 320, 960, 640, 0x000000, 0.6).setDepth(90);
     const t1 = this.add.text(480, 270, victory ? '¡VICTORIA!' : 'DERROTA', {
       fontSize: '72px', color: victory ? '#ffd23f' : '#ff6666', fontStyle: 'bold',
     }).setOrigin(0.5).setDepth(91);
-    const t2 = this.add.text(480, 350, 'ENTER para volver a elegir equipo', { fontSize: '24px', color: '#fff' })
+    const t2 = this.add.text(480, 350, (this.returnTo ? 'ENTER para volver al camino' : 'ENTER para volver a elegir equipo'), { fontSize: '24px', color: '#fff' })
       .setOrigin(0.5).setDepth(91);
     this.menuLayer.add([bg, t1, t2]);
   }
@@ -1021,7 +1034,7 @@ export class BattleScene extends Phaser.Scene {
     }
     if (this.catching) return; // la secuencia de captura no se interrumpe
     if (this.over) {
-      if (e.key === 'Enter') this.scene.start('Select');
+      if (e.key === 'Enter') this.leave();
       return;
     }
     if (!this.paused) {
@@ -1046,14 +1059,20 @@ export class BattleScene extends Phaser.Scene {
     this.renderMenu();
   }
 
+  // Termina la batalla: vuelve al camino si venía del mundo, o a la selección de equipo.
+  private leave() {
+    if (this.returnTo) this.scene.start('World', this.returnTo);
+    else this.scene.start('Select');
+  }
+
   // Acciones del menú principal; "Poké Balls" solo existe frente a un Pokémon salvaje.
   private mainActions(): string[] {
-    return ['resume', 'team', 'items', ...(this.wild ? ['balls'] : []), 'settings', 'exit'];
+    return ['resume', 'team', 'items', ...(this.wild ? ['balls'] : []), 'settings', ...(this.trainer ? [] : ['exit'])];
   }
 
   private menuOptions(): string[] {
     const m = this.menu;
-    if (m.screen === 'main') return this.mainActions().map((a) => MAIN_LABEL[a]);
+    if (m.screen === 'main') return this.mainActions().map((a) => (a === 'exit' && this.returnTo ? 'Huir al camino' : MAIN_LABEL[a]));
     if (m.screen === 'balls') {
       const e = this.cur(this.enemy);
       return [
@@ -1165,7 +1184,7 @@ export class BattleScene extends Phaser.Scene {
       else if (act === 'items') { m.screen = 'items'; m.idx = 0; m.msg = ''; }
       else if (act === 'balls') { m.screen = 'balls'; m.idx = 0; m.msg = ''; }
       else if (act === 'settings') { m.screen = 'settings'; m.idx = 0; m.msg = ''; }
-      else this.scene.start('Select');
+      else this.leave();
     } else if (m.screen === 'balls') {
       const ids = Object.keys(BALLS) as BallId[];
       if (i >= ids.length) { m.screen = 'main'; m.idx = 0; m.msg = ''; }

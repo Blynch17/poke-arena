@@ -31,6 +31,22 @@ del nivel (por debajo del nivel 21 es más fácil). Está en `src/capture.ts`. N
 críticas. Por ahora, al capturar solo termina la batalla; `onCaptured` en `BattleScene.ts` es el gancho donde, cuando
 exista la historia, el Pokémon se sumará al equipo.
 
+## Modo aventura: Ruta Los Aromos
+
+En la selección de equipo, **TAB** también tiene el modo *aventura*: el equipo elegido sale a caminar por una ruta
+con hierba alta, como en los juegos de la serie. Se controla un entrenador huaso chileno (arte original, hecho con
+`tools/make_trainer_sprite.py`).
+
+- Camina con **W/A/S/D** o las flechas (o con clic del mouse, si los controles están en *Mouse*; el personaje busca el
+  camino hasta ese punto). **ENTER** abre el menú (volumen, controles y salir).
+- En la hierba alta puede aparecer un Pokémon salvaje (14 % por paso, y nunca en los 3 primeros pasos). Empieza la
+  misma batalla del modo salvaje, con captura incluida; al huir o ganar vuelves al mismo lugar de la ruta.
+- Al costado del camino espera **el huaso Anselmo** (`RIVAL` en `src/route.ts`): si cruzas su línea de visión te reta a un
+  combate de equipos. No se puede huir ni capturar sus Pokémon; si pierdes vuelves a la entrada de la ruta, y si ganas
+  ya no te reta de nuevo (hasta que salgas de la aventura). Su sprite sale de `tools/make_rival_sprite.py`.
+- Qué aparece y a qué nivel está en `ROUTE_ENCOUNTERS` (`src/route.ts`); el mapa se genera en `buildRoute()` con una
+  semilla fija. Por ahora la vida y los niveles se reinician en cada batalla.
+
 ## Desarrollo
 
 ```bash

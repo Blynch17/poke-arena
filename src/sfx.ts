@@ -333,6 +333,22 @@ class Sfx {
     }
   }
 
+  /** Pisar hierba alta: roce corto de hojas. */
+  rustle(x?: number) {
+    const t = this.begin(x);
+    if (t === null) return;
+    this.noise(t, 0.14, 'bandpass', 3000, 1600, 0.35, 1.2);
+    this.noise(t + 0.05, 0.1, 'highpass', 4500, 3500, 0.2);
+  }
+
+  /** Aparece un Pokémon salvaje: alarma que sube en tres golpes. */
+  encounter(x?: number) {
+    const t = this.begin(x);
+    if (t === null) return;
+    [330, 440, 660].forEach((f, i) => this.tone(t + i * 0.13, f, f * 1.5, 0.16, 'square', 0.22));
+    this.noise(t + 0.4, 0.25, 'bandpass', 800, 3000, 0.4, 1);
+  }
+
   /** Lanzar la bola: silbido corto. */
   throwBall(x?: number) {
     const t = this.begin(x);

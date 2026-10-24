@@ -15,7 +15,8 @@ export class SelectScene extends Phaser.Scene {
   private info!: Phaser.GameObjects.Text;
   private hint!: Phaser.GameObjects.Text;
   private modeText!: Phaser.GameObjects.Text;
-  private mode: 'arena' | 'wild' = 'arena'; // arena: contra un rival con equipo · wild: contra un Pokémon salvaje, con Pokébolas
+  // arena: contra un rival con equipo · wild: contra un Pokémon salvaje, con Pokébolas · adventure: camina por la ruta y aparecen salvajes
+  private mode: 'arena' | 'wild' | 'adventure' = 'arena';
 
   constructor() {
     super('Select');
@@ -66,11 +67,12 @@ export class SelectScene extends Phaser.Scene {
     else if (e.key === 'ArrowLeft') this.cursor = (this.cursor + n - 1) % n;
     else if (e.key === 'ArrowDown') this.moveVertical(1);
     else if (e.key === 'ArrowUp') this.moveVertical(-1);
-    else if (e.key === 'Tab') this.mode = this.mode === 'arena' ? 'wild' : 'arena';
+    else if (e.key === 'Tab') this.mode = this.mode === 'arena' ? 'wild' : this.mode === 'wild' ? 'adventure' : 'arena';
     else if (e.key === 'Backspace') this.picks.pop();
     else if (e.key === 'Enter') {
       if (this.picks.length === TEAM_SIZE) {
-        this.scene.start('Battle', { team: this.picks, wild: this.mode === 'wild' });
+        if (this.mode === 'adventure') this.scene.start('World', { team: this.picks });
+        else this.scene.start('Battle', { team: this.picks, wild: this.mode === 'wild' });
         return;
       }
       if (!this.picks.includes(this.cursor)) this.picks.push(this.cursor);
@@ -88,9 +90,9 @@ export class SelectScene extends Phaser.Scene {
 
   private refresh() {
     this.modeText.setText(
-      this.mode === 'arena'
-        ? 'Modo: combate de arena   ·   TAB: cambiar a Pokémon salvaje'
-        : 'Modo: Pokémon salvaje (Poké Balls)   ·   TAB: cambiar a combate de arena',
+      this.mode === 'arena' ? 'Modo: combate de arena   ·   TAB: cambiar de modo'
+        : this.mode === 'wild' ? 'Modo: Pokémon salvaje (Poké Balls)   ·   TAB: cambiar de modo'
+        : 'Modo: aventura por la ruta (hierba alta)   ·   TAB: cambiar de modo',
     );
     this.cards.forEach((c, i) => c.setStrokeStyle(4, i === this.cursor ? 0xffd23f : 0x3f5c48));
     this.badges.forEach((b, i) => {
