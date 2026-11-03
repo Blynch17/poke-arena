@@ -5,7 +5,8 @@ import {
   BALLS, BallId, makeCombatant, WILD_LEVEL_MIN, WILD_LEVEL_MAX,
 } from '../data';
 import { catchX, captureChance, rollCapture } from '../capture';
-import { Fx, HEAD_TEXTURE, SPIN, STREAM_FX } from '../fx';
+import { Fx, HEAD_TEXTURE, HIDE_HEAD, SPIN, STREAM_FX } from '../fx';
+import { Area, buildArea } from '../area';
 import { music } from '../music';
 import { sfx } from '../sfx';
 import { settings, saveSettings } from '../settings';
@@ -15,6 +16,24 @@ const R = 30; // radio de colisión de los Pokémon
 // Teclas de ataque según el esquema de controles (ajustes).
 const KEY_SETS = { keys: ['U', 'I', 'O', 'P'], mouse: ['Q', 'W', 'E', 'R'] };
 const SPRITE_SCALE = 3; // los sprites de overworld miden 32x32
+// Efectos nuevos que reutilizan el sonido de otro.
+const SFX_ALIAS: Record<string, string> = {
+  wind: 'wing', star: 'fairy', bubble: 'water', bone: 'rock', jet: 'water', hyper: 'solar', aurora: 'ice', icebeam: 'ice',
+  vine: 'leaf', blade: 'leaf', razor: 'leaf', psybeam: 'psy', dragonbreath: 'dragon', darkbeam: 'shadow', flash: 'steel',
+  moon: 'fairy', gleam: 'fairy', blast: 'flame', note: 'fairy', notes: 'fairy', cone: 'sludge', toxic: 'sludge',
+  sludgebomb: 'sludge', tornado: 'wing', zap: 'spark', tri: 'psy', egg: 'rock', ghost: 'shadow', ancient: 'rock',
+  dream: 'shadow', mind: 'psychic', buzz: 'spark',
+};
+
+// Ataques en dos tiempos (Vuelo, Bote, Excavar): ms que tarda en irse, que se ve la marca (el rival puede esquivar),
+// que dura la caída, cuánto sigue al rival antes de fijar el punto y el radio del golpe.
+const LEAP: Record<string, { up: number; mark: number; dive: number; track: number; r: number }> = {
+  fly: { up: 450, mark: 1000, dive: 250, track: 500, r: 70 },
+  bounce: { up: 300, mark: 700, dive: 200, track: 350, r: 100 },
+  dig: { up: 400, mark: 1000, dive: 0, track: 500, r: 70 },
+};
+const LIFT_MAX = 560; // px que sube un Pokémon que vuela
+const sfxKey = (fx: string) => SFX_ALIAS[fx] ?? fx;
 
 // Hoja de caminata: 2 cuadros por fila; filas = abajo, arriba, izquierda, derecha.
 function walkRow(f: Phaser.Math.Vector2): number {
@@ -49,7 +68,14 @@ interface Side {
   dash: Dash | null; // embestida en curso
   auraUntil: number; // aura amarilla mientras se concentra tras una mejora
   aura: Phaser.GameObjects.Ellipse;
+  glow: { fx: string; power: number; until: number; tint?: number } | null; // aura del tipo mientras dura un ataque de contacto
+  charging: { mv: Move; m: Member; at: number } | null; // cargando un ataque (Rayo Solar): se puede apuntar pero no caminar
+  leap: Leap | null;   // ataque en dos tiempos en curso
+  lift: number;        // altura visual sobre el suelo (px)
+  hidden: boolean;     // fuera de la vista y sin poder ser golpeado (Vuelo, Excavar)
 }
+
+interface Leap { mv: Move; att: Member; t0: number; mx: number; my: number; started: boolean }
 
 interface Dash {
   vx: number; vy: number; until: number; move: Move; att: Member; ghostAt: number;
@@ -69,7 +95,12 @@ interface Shot {
   acc: number;
   age: number;
   stream?: { dx: number; dy: number; state: 'fly' | 'end'; endAt: number }; // chorro continuo
+  flipped?: boolean; // bumerán: ya dio la vuelta
+  lob?: { x0: number; y0: number; lx: number; ly: number; flight: number }; // lanzado en arco hacia un punto
 }
+
+// Ataque de área en curso (ver area.ts).
+interface ActiveArea { a: Area; owner: Side; att: Member; move: Move }
 
 type MenuScreen = '' | 'main' | 'team' | 'items' | 'balls' | 'settings' | 'controls';
 
@@ -81,6 +112,7 @@ export class BattleScene extends Phaser.Scene {
   private player!: Side;
   private enemy!: Side;
   private shots: Shot[] = [];
+  private areas: ActiveArea[] = [];
   private t = 0;
   private paused = false;
   private over = false;
@@ -120,6 +152,7 @@ export class BattleScene extends Phaser.Scene {
 
   create(data: { team: number[]; wild?: boolean; wildId?: string; wildLevel?: number; trainer?: string; returnTo?: Record<string, unknown> }) {
     this.shots = [];
+    this.areas = [];
     this.moveTexts = [];
     this.t = 0;
     this.paused = false;
@@ -215,11 +248,14 @@ export class BattleScene extends Phaser.Scene {
     return {
       isPlayer, team, active: 0, sprite, shadow, arrow, facing,
       cd: [0, 0, 0, 0], invuln: 0, kb: new Phaser.Math.Vector2(), down: false, moving: false,
-      lockUntil: 0, dash: null, auraUntil: 0, aura,
+      lockUntil: 0, dash: null, auraUntil: 0, aura, glow: null, charging: null, leap: null, lift: 0, hidden: false,
     };
   }
 
   private cur(s: Side): Member { return s.team[s.active]; }
+
+  // ¿Puede recibir un golpe ahora? (no si está debilitado, escondido en pleno Vuelo/Excavar o recién llegado)
+  private canHit(s: Side): boolean { return !s.down && !s.hidden && this.t >= s.invuln; }
 
   // Velocidad de movimiento (px/s). Las etapas de Velocidad se notan solo en parte (SPEED_STAGE_EFFECT):
   // en los juegos deciden quién ataca primero; aquí un multiplicador completo se sentía demasiado rápido.
@@ -245,6 +281,10 @@ export class BattleScene extends Phaser.Scene {
       this.updateDashes();
       this.separate();
       this.updateShots(s);
+      this.updateAreas(dt);
+      this.updateGlows(dt);
+      this.updateCharging(dt);
+      this.updateLeaps(dt);
       this.updateBalls(s);
       this.regen(this.player, s);
       this.regen(this.enemy, s);
@@ -271,7 +311,7 @@ export class BattleScene extends Phaser.Scene {
 
   private separate() {
     const a = this.player.sprite, b = this.enemy.sprite;
-    if (this.player.down || this.enemy.down) return;
+    if (this.player.down || this.enemy.down || this.player.hidden || this.enemy.hidden) return;
     const dx = b.x - a.x, dy = b.y - a.y;
     const d = Math.hypot(dx, dy) || 1;
     if (d < R * 2) {
@@ -289,22 +329,25 @@ export class BattleScene extends Phaser.Scene {
     const k = this.keys;
     let vx = 0, vy = 0;
     const free = this.t >= p.lockUntil;
+    const canAim = free || !!p.charging;   // cargando un ataque se puede apuntar, pero no caminar
     if (settings.controls === 'keys') {
       // WASD: se camina y se apunta hacia donde se camina.
       const dir = new Phaser.Math.Vector2(
         (k.D.isDown ? 1 : 0) - (k.A.isDown ? 1 : 0),
         (k.S.isDown ? 1 : 0) - (k.W.isDown ? 1 : 0),
       );
-      if (dir.lengthSq() > 0 && free) {
+      if (dir.lengthSq() > 0 && canAim) {
         dir.normalize();
         p.facing.copy(dir);
-        const sp = this.speedOf(p);
-        vx = dir.x * sp; vy = dir.y * sp;
+        if (free) {
+          const sp = this.speedOf(p);
+          vx = dir.x * sp; vy = dir.y * sp;
+        }
       }
     } else {
       // Mouse: se camina hasta el punto del clic y se apunta siempre hacia el cursor.
       const ptr = this.input.activePointer;
-      if (this.pointerSeen && free && !p.dash) {
+      if (this.pointerSeen && canAim && !p.dash) {
         const ax = ptr.worldX - p.sprite.x, ay = ptr.worldY - p.sprite.y;
         if (Math.hypot(ax, ay) > 4) p.facing.set(ax, ay).normalize();
       }
@@ -460,6 +503,7 @@ export class BattleScene extends Phaser.Scene {
     const ci = struggle ? 0 : i; // Forcejeo comparte una sola recarga
     if (this.t < side.cd[ci]) return false;
     const mv = struggle ? STRUGGLE : m.def.moves[i];
+    if (!mv) return false; // esa tecla no tiene ataque (Magikarp y Ditto tienen uno solo)
     if (!struggle && m.pp[i] <= 0) {
       if (side.isPlayer && this.t - this.noPpAt > 700) {
         this.noPpAt = this.t;
@@ -478,23 +522,224 @@ export class BattleScene extends Phaser.Scene {
     if (struggle && side.isPlayer) this.floatText(side.sprite.x, side.sprite.y - 60, '¡Forcejeo!', '#ffb86b');
     if (mv.category === 'status') {
       sfx.boost(side.sprite.x);
-      this.applyBoost(side, m, mv);
+      if (mv.transform) this.transform(side, m);
+      else if (Object.keys(mv.boost ?? {}).length === 0) this.splash(side);
+      else this.applyBoost(side, m, mv);
       return true;
     }
-    sfx.cast(mv.fx ?? 'slam', side.sprite.x);
+    sfx.cast(sfxKey(mv.fx ?? 'slam'), side.sprite.x);
     if (mv.style === 'dash') { this.startDash(side, m, mv); return true; }
     if (mv.style === 'reach') { this.reachAttack(side, m, mv); return true; }
+    if (mv.style === 'leap') { this.startLeap(side, m, mv); return true; }
+    if (mv.style === 'ground' || mv.style === 'spikes' || mv.style === 'rain' || mv.style === 'nova' || mv.style === 'strike' || mv.style === 'wave' || mv.style === 'storm') {
+      this.castArea(side, m, mv);
+      return true;
+    }
+    if (mv.charge) { side.charging = { mv, m, at: this.t + mv.charge }; side.lockUntil = this.t + mv.charge; return true; }
+    this.fireShots(side, m, mv);
+    return true;
+  }
+
+  // Lanza el proyectil (o chorro) de un ataque.
+  private fireShots(side: Side, m: Member, mv: Move) {
     const f = side.facing;
     const fx = mv.fx ?? 'ember';
-    const ox = side.sprite.x + f.x * 44, oy = side.sprite.y + f.y * 44;
     const isStream = STREAM_FX.has(fx);
-    const img = this.add.image(ox, oy, HEAD_TEXTURE[fx] ?? 'orb').setScale(mv.size).setDepth(8).setVisible(!isStream);
+    this.fx.muzzle(fx, side.sprite.x + f.x * 40, side.sprite.y + f.y * 40, f.x, f.y, mv.power);
+    if (mv.lob) { this.lobShot(side, m, mv, fx); return; }
+    // Abanico: varios proyectiles que se reparten el daño del ataque (con uno solo al blanco, pega menos que el ataque entero).
+    const n = mv.multi ?? 1, base = Math.atan2(f.y, f.x);
+    const shotMove = n > 1 ? { ...mv, power: Math.max(1, Math.round(mv.power * Math.min(0.8, 2.4 / n))) } : mv;
+    for (let k = 0; k < n; k++) {
+      const ang = base + (k - (n - 1) / 2) * (mv.spread ?? 0), dx = Math.cos(ang), dy = Math.sin(ang);
+      const ox = side.sprite.x + dx * 44, oy = side.sprite.y + dy * 44;
+      const img = this.add.image(ox, oy, HEAD_TEXTURE[fx] ?? 'orb').setScale(mv.size).setDepth(8).setVisible(!isStream && !HIDE_HEAD.has(fx));
+      if (fx === 'wind' || fx === 'cone') img.setRotation(ang);
+      this.shots.push({
+        img, vx: dx * mv.speed, vy: dy * mv.speed, owner: side, att: m, move: shotMove, dieAt: this.t + mv.life,
+        fx, ox, oy, acc: 0, age: 0,
+        stream: isStream ? { dx, dy, state: 'fly', endAt: 0 } : undefined,
+      });
+    }
+  }
+
+
+  // Bomba Huevo: se lanza en arco hacia el punto donde está el rival y explota al caer, dañando en un área.
+  private lobShot(side: Side, m: Member, mv: Move, fx: string) {
+    const f = side.facing, target = side === this.player ? this.enemy : this.player;
+    const dist = Phaser.Math.Clamp(Math.hypot(target.sprite.x - side.sprite.x, target.sprite.y - side.sprite.y), 160, 520);
+    const flight = 750, x0 = side.sprite.x + f.x * 40, y0 = side.sprite.y + f.y * 40;
+    const lx = Phaser.Math.Clamp(side.sprite.x + f.x * dist, A.x + 20, A.x + A.w - 20), ly = Phaser.Math.Clamp(side.sprite.y + f.y * dist, A.y + 20, A.y + A.h - 20);
+    const img = this.add.image(x0, y0, HEAD_TEXTURE[fx] ?? 'orb').setScale(mv.size * 1.6).setDepth(11);
     this.shots.push({
-      img, vx: f.x * mv.speed, vy: f.y * mv.speed, owner: side, att: m, move: mv, dieAt: this.t + mv.life,
-      fx, ox, oy, acc: 0, age: 0,
-      stream: isStream ? { dx: f.x, dy: f.y, state: 'fly', endAt: 0 } : undefined,
+      img, vx: (lx - x0) / (flight / 1000), vy: (ly - y0) / (flight / 1000), owner: side, att: m, move: mv, dieAt: this.t + flight,
+      fx, ox: x0, oy: y0, acc: 0, age: 0, lob: { x0, y0, lx, ly, flight },
     });
-    return true;
+  }
+
+  private explodeLob(sh: Shot) {
+    const lob = sh.lob!, mv = sh.move, owner = sh.owner, target = owner === this.player ? this.enemy : this.player;
+    this.fx.explosion(lob.lx, lob.ly, mv.lob!, 'fairy');
+    this.cameras.main.shake(130, 0.0035);
+    sfx.hit('rock', 1, false, true, lob.lx);
+    if (this.canHit(target) && Math.hypot(target.sprite.x - lob.lx, target.sprite.y - lob.ly) < mv.lob! + R * 0.6) {
+      const len = Math.hypot(target.sprite.x - lob.lx, target.sprite.y - lob.ly) || 1;
+      this.applyHit(owner, sh.att, mv, target, target.sprite.x, target.sprite.y, (target.sprite.x - lob.lx) / len, (target.sprite.y - lob.ly) / len, 1);
+    }
+  }
+
+  // Carga de un ataque (Rayo Solar): luz que se junta en la boca; al terminar se lanza hacia donde se apunta.
+  private updateCharging(dt: number) {
+    for (const side of [this.player, this.enemy]) {
+      const c = side.charging;
+      if (!c) continue;
+      if (side.down || this.cur(side) !== c.m) { side.charging = null; continue; }
+      const k = Phaser.Math.Clamp(1 - (c.at - this.t) / (c.mv.charge ?? 1), 0, 1);
+      this.fx.charge(side.sprite.x, side.sprite.y, side.facing.x, side.facing.y, k, dt);
+      if (this.t >= c.at) {
+        side.charging = null;
+        side.lockUntil = this.t + 120;
+        this.fireShots(side, c.m, c.mv);
+      }
+    }
+  }
+
+  // ---------- ataques en dos tiempos (Vuelo, Bote, Excavar) ----------
+
+  private startLeap(side: Side, m: Member, mv: Move) {
+    const cfg = LEAP[mv.leap ?? 'fly'];
+    side.leap = { mv, att: m, t0: this.t, mx: side.sprite.x, my: side.sprite.y, started: false };
+    side.lockUntil = this.t + cfg.up + cfg.mark + cfg.dive + 300;
+  }
+
+  private endLeap(side: Side) {
+    side.leap = null;
+    side.hidden = false;
+    side.lift = 0;
+    side.sprite.setScale(SPRITE_SCALE);
+  }
+
+  private updateLeaps(dt: number) {
+    for (const side of [this.player, this.enemy]) {
+      const L = side.leap;
+      if (!L) continue;
+      if (side.down || this.cur(side) !== L.att) { this.endLeap(side); continue; }
+      const kind = L.mv.leap ?? 'fly', cfg = LEAP[kind], t = this.t - L.t0, target = side === this.player ? this.enemy : this.player;
+      const markEnd = cfg.up + cfg.mark, total = markEnd + cfg.dive;
+      const sx = side.sprite.x, sy = side.sprite.y;
+      if (t < cfg.up) {   // se va: sube hasta perderse de vista o se hunde bajo tierra
+        const k = t / cfg.up;
+        if (!L.started) { L.started = true; this.fx.ring(sx, sy + 20, kind === 'dig' ? 0xc09a5a : 0xffffff, 10, 70, 350, 4); }
+        if (kind === 'dig') {
+          side.sprite.setScale(SPRITE_SCALE * (1 - 0.85 * k));
+          for (let i = 0; i < 2; i++) this.fx.spawn(sx + (Math.random() - 0.5) * 50, sy + 24, { vx: (Math.random() - 0.5) * 140, vy: -100 - Math.random() * 100, g: 800, life: 460, s0: 10, s1: 3, colors: [0xe0c68a, 0xc09a5a, 0xa07840] });
+        } else {
+          side.lift = LIFT_MAX * k * k;
+          this.fx.spawn(sx + (Math.random() - 0.5) * 30, sy + 10, { vx: (Math.random() - 0.5) * 60, vy: 120, life: 260, s0: 3, len: 30, rot: Math.PI / 2, colors: [0xffffff, 0xd8f6ff], a0: 0.8 });
+        }
+      } else if (t < markEnd) {   // escondido: se ve dónde va a caer
+        if (!side.hidden) { side.hidden = true; L.mx = Phaser.Math.Clamp(target.sprite.x, A.x + R, A.x + A.w - R); L.my = Phaser.Math.Clamp(target.sprite.y, A.y + R, A.y + A.h - R); }
+        const since = t - cfg.up;
+        if (since < cfg.track && !target.down) { L.mx = Phaser.Math.Clamp(target.sprite.x, A.x + R, A.x + A.w - R); L.my = Phaser.Math.Clamp(target.sprite.y, A.y + R, A.y + A.h - R); }
+        this.fx.leapMark(kind, L.mx, L.my, since / cfg.mark, since >= cfg.track);
+      } else if (t < total) {      // cae en picada
+        const kd = (t - markEnd) / cfg.dive;
+        side.sprite.setPosition(L.mx, L.my);
+        side.hidden = false;
+        side.lift = LIFT_MAX * (1 - kd * kd);
+        this.fx.spawn(L.mx + (Math.random() - 0.5) * 24, L.my - side.lift + 20, { vx: 0, vy: -140, life: 200, s0: 3, len: 34, rot: Math.PI / 2, colors: [0xffffff], a0: 0.85 });
+      } else {                      // toca el suelo: daño en un círculo
+        side.sprite.setPosition(L.mx, L.my);
+        const mv = L.mv;
+        this.endLeap(side);
+        side.lockUntil = this.t + 250;
+        const hitIt = this.canHit(target) && Math.hypot(target.sprite.x - L.mx, target.sprite.y - L.my) < cfg.r + R * 0.6;
+        if (hitIt) {
+          const len = Math.hypot(target.sprite.x - L.mx, target.sprite.y - L.my) || 1;
+          this.applyHit(side, L.att, mv, target, target.sprite.x, target.sprite.y, (target.sprite.x - L.mx) / len || 1, (target.sprite.y - L.my) / len, 1.3);
+        } else this.fx.impact(mv.fx ?? 'wing', L.mx, L.my, 0, mv.power);
+        this.cameras.main.shake(160, 0.004);
+        if (kind === 'bounce') for (let i = 0; i < 3; i++) this.fx.ring(L.mx, L.my, [0xffffff, 0xd8f6ff, 0x9fd8ff][i], 10, 90 + i * 40, 320 + i * 90, 5 - i);
+        for (let i = 0; i < 10; i++) this.fx.spawn(L.mx, L.my, { vx: (Math.random() - 0.5) * 300, vy: -90 - Math.random() * 160, g: 700, life: 520, s0: 10, s1: 3, colors: kind === 'dig' ? [0xe0c68a, 0xc09a5a, 0xa07840] : [0xe0d8c0, 0xc0b898] });
+      }
+    }
+  }
+
+  // Ataque de área: se crea con su geometría y se va dibujando y comprobando cada cuadro (ver updateAreas).
+  private castArea(side: Side, m: Member, mv: Move) {
+    const f = side.facing, target = side === this.player ? this.enemy : this.player;
+    const a = buildArea(mv, side.sprite.x, side.sprite.y + 6, f.x, f.y, A, { x: target.sprite.x, y: target.sprite.y + 8 });
+    this.areas.push({ a, owner: side, att: m, move: mv });
+    side.lockUntil = this.t + (mv.style === 'nova' ? 300 : 380);   // un instante concentrándose
+    if (mv.style === 'ground') this.cameras.main.shake(260, 0.0035);
+    if (mv.fx === 'mind') this.tweens.add({ targets: this.cameras.main, zoom: 1.045, duration: 260, yoyo: true, ease: 'Sine.easeInOut' });   // la realidad se deforma
+  }
+
+  private updateAreas(dt: number) {
+    for (let n = this.areas.length - 1; n >= 0; n--) {
+      const { a, owner, att, move } = this.areas[n];
+      const target = owner === this.player ? this.enemy : this.player;
+      a.lastT = a.t;
+      a.t += dt;
+      if (a.kind === 'strike' && a.t < a.trackUntil && !target.down) { a.zones[0].x = target.sprite.x; a.zones[0].y = target.sprite.y + 8; }
+      this.fx.area(a, dt);
+      if (!a.hit && this.canHit(target)) {
+        const tx = target.sprite.x, ty = target.sprite.y;
+        let hit = false;
+        if (a.kind === 'nova') {
+          const dur = (a.range / a.speed) * 1000, p = Math.min(1, a.t / dur), front = a.range * (1 - (1 - p) * (1 - p));
+          hit = a.t <= dur + 80 && Math.abs(Math.hypot(tx - a.ox, ty - a.oy) - front) < R + 28;   // el frente de la onda pasa por el rival
+        } else if (a.kind === 'wave') {   // la ola es ancha: golpea a lo que esté a su ancho cuando pasa su frente
+          const front = Math.min(a.range, (a.speed * a.t) / 1000), along = (tx - a.ox) * a.dx + (ty - a.oy) * a.dy, perp = -(tx - a.ox) * a.dy + (ty - a.oy) * a.dx;
+          hit = a.t <= (a.range / a.speed) * 1000 + 80 && Math.abs(along - front) < 50 && Math.abs(perp) < 120 + 50 * (front / a.range) + R * 0.5;
+        } else if (a.kind === 'storm') {  // la tormenta avanza y se ensancha
+          const front = Math.min(a.range, (a.speed * a.t) / 1000), r = 60 + 40 * (front / a.range);
+          hit = a.t <= (a.range / a.speed) * 1000 + 100 && Math.hypot(tx - (a.ox + a.dx * front), ty - (a.oy + a.dy * front)) < r + R * 0.6;
+        } else {
+          hit = a.zones.some((z) => a.t >= z.t0 && a.t <= z.t1 && Math.hypot(tx - z.x, ty - z.y) < z.r + R * 0.6);
+        }
+        if (hit) {
+          a.hit = true;
+          const along = a.kind === 'wave' || a.kind === 'storm';   // la ola y la ventisca empujan en la dirección en que avanzan
+          const len = Math.hypot(tx - a.ox, ty - a.oy) || 1;
+          this.applyHit(owner, att, move, target, tx, ty, along ? a.dx : (tx - a.ox) / len, along ? a.dy : (ty - a.oy) / len, 1);
+        }
+      }
+      if (a.t >= a.life) this.areas.splice(n, 1);
+    }
+  }
+
+  // Aura del tipo alrededor de quien usa un ataque de contacto; crece con el poder.
+  private updateGlows(dt: number) {
+    for (const side of [this.player, this.enemy]) {
+      const g = side.glow;
+      if (!g) continue;
+      if (this.t >= g.until || side.down) { if (g.tint !== undefined) side.sprite.clearTint(); side.glow = null; continue; }
+      this.fx.aura(g.fx, side.sprite.x, side.sprite.y, g.power, dt);
+    }
+  }
+
+  // Salpicadura: no hace nada, como en los juegos.
+  private splash(side: Side) {
+    side.lockUntil = this.t + 360;
+    this.floatText(side.sprite.x, side.sprite.y - 60, '¡Pero no pasó nada!', '#9fd8ff');
+    this.fx.impact('water', side.sprite.x, side.sprite.y + 24, -Math.PI / 2, 30);
+    this.tweens.add({ targets: side.sprite, scaleY: SPRITE_SCALE * 1.22, scaleX: SPRITE_SCALE * 0.85, duration: 120, yoyo: true, repeat: 1, onComplete: () => side.sprite.setScale(SPRITE_SCALE) });
+  }
+
+  // Transformación (Ditto): copia especie, tipos, stats (menos los PS) y ataques del rival durante toda la batalla.
+  // Como cada combate crea sus Pokémon desde cero, al empezar otra batalla Ditto vuelve a ser Ditto.
+  private transform(side: Side, m: Member) {
+    const foeSide = side === this.player ? this.enemy : this.player, foe = this.cur(foeSide);
+    m.def = { ...foe.def, name: `Ditto (${foe.def.name})` };
+    m.stats = { ...foe.stats, hp: m.stats.hp };
+    m.pp = foe.def.moves.map((mv) => maxUses({ ...mv, pp: 5 }));   // 5 PP en cada ataque copiado
+    side.cd = [0, 1, 2, 3].map(() => this.t + 500);
+    this.floatText(side.sprite.x, side.sprite.y - 60, `¡Ditto se transformó en ${foe.def.name}!`, '#ffb3e6');
+    this.fx.rise(side.sprite.x, side.sprite.y, 0xff8fcf, 10);
+    this.fx.ring(side.sprite.x, side.sprite.y, 0xffd1ec, 20, 90, 450, 4);
+    this.tweens.add({ targets: side.sprite, scaleX: SPRITE_SCALE * 0.2, scaleY: SPRITE_SCALE * 1.4, duration: 170, yoyo: true, onComplete: () => side.sprite.setScale(SPRITE_SCALE) });
+    if (side.isPlayer) this.refreshMoveTexts();
   }
 
   // Embestida: quien ataca se lanza hacia adelante y daña a lo primero que toca.
@@ -502,6 +747,8 @@ export class BattleScene extends Phaser.Scene {
     const f = side.facing, speed = 950;
     const ms = ((mv.dash ?? 200) / speed) * 1000;
     side.dash = { vx: f.x * speed, vy: f.y * speed, until: this.t + ms, move: mv, att: m, ghostAt: 0 };
+    side.glow = { fx: mv.fx ?? 'slam', power: mv.power, until: this.t + ms + 380, tint: mv.tint };
+    if (mv.tint !== undefined) side.sprite.setTint(mv.tint);   // se pone rojo mientras ataca (Enfado)
     side.lockUntil = this.t + ms + 260; // además queda un instante recuperándose
   }
 
@@ -517,7 +764,7 @@ export class BattleScene extends Phaser.Scene {
       this.fx.streak(side.sprite.x, side.sprite.y + 8, f.x, f.y);
       const target = side === this.player ? this.enemy : this.player;
       const dist = Math.hypot(target.sprite.x - side.sprite.x, target.sprite.y - side.sprite.y);
-      if (!target.down && this.t >= target.invuln && dist < R * 2 + 6) {
+      if (this.canHit(target) && dist < R * 2 + 6) {
         const px = (side.sprite.x + target.sprite.x) / 2, py = (side.sprite.y + target.sprite.y) / 2;
         side.dash = null;
         side.lockUntil = this.t + 220;
@@ -533,9 +780,10 @@ export class BattleScene extends Phaser.Scene {
     const f = side.facing, reach = mv.reach ?? 150;
     const ang = Math.atan2(f.y, f.x);
     this.fx.tongue(side.sprite.x + f.x * 22, side.sprite.y + f.y * 22 - 6, ang, reach);
+    side.glow = { fx: mv.fx ?? 'lick', power: mv.power, until: this.t + 380 };
     side.lockUntil = this.t + 340;
     const target = side === this.player ? this.enemy : this.player;
-    if (target.down || this.t < target.invuln) return;
+    if (!this.canHit(target)) return;
     const dx = target.sprite.x - side.sprite.x, dy = target.sprite.y - side.sprite.y;
     const dist = Math.hypot(dx, dy);
     const diff = Math.abs(Phaser.Math.Angle.Wrap(Math.atan2(dy, dx) - ang));
@@ -557,9 +805,10 @@ export class BattleScene extends Phaser.Scene {
     side.lockUntil = this.t + (mv.lock ?? 0);
     side.auraUntil = side.lockUntil;
     notes.forEach((n, i) => this.floatText(x, y - 56 - i * 22, n, '#ffe066'));
+    this.fx.rise(x, y, TYPE_COLOR[mv.type], 6 + Math.round((mv.lock ?? 0) / 500));   // partículas del tipo subiendo
     const rings = Math.max(1, Math.ceil((mv.lock ?? 0) / 450));
     for (let r = 0; r < rings; r++) {
-      const ring = this.add.circle(x, y, 28, 0xffe066, 0).setStrokeStyle(4, 0xffe066).setDepth(7).setAlpha(0);
+      const ring = this.add.circle(x, y, 28, 0xffe066, 0).setStrokeStyle(4, TYPE_COLOR[mv.type]).setDepth(7).setAlpha(0);
       this.tweens.add({
         targets: ring, scale: 2.4, alpha: { from: 0.9, to: 0 }, duration: 650, delay: r * 450,
         onStart: () => ring.setPosition(side.sprite.x, side.sprite.y), onComplete: () => ring.destroy(),
@@ -574,10 +823,21 @@ export class BattleScene extends Phaser.Scene {
         if (this.updateStream(sh, s)) { sh.img.destroy(); this.shots.splice(n, 1); }
         continue;
       }
+      if (sh.lob) {   // proyectil en arco: sigue su trayectoria y explota al llegar
+        sh.age += s * 1000;
+        const k = Math.min(1, sh.age / sh.lob.flight), lx = sh.lob.x0 + (sh.lob.lx - sh.lob.x0) * k, ly = sh.lob.y0 + (sh.lob.ly - sh.lob.y0) * k;
+        sh.img.setPosition(lx, ly - 120 * Math.sin(Math.PI * k));
+        sh.img.rotation += (SPIN[sh.fx] ?? 0) * s;
+        this.fx.trail({ x: lx, y: ly - 120 * Math.sin(Math.PI * k), vx: sh.vx, vy: sh.vy, fx: sh.fx, ox: sh.ox, oy: sh.oy, acc: 0, age: sh.age }, s * 1000);
+        if (k >= 1) { this.explodeLob(sh); sh.img.destroy(); this.shots.splice(n, 1); }
+        continue;
+      }
+      if (sh.move.boomerang && !sh.flipped && this.t >= sh.dieAt - sh.move.life / 2) { sh.vx = -sh.vx; sh.vy = -sh.vy; sh.flipped = true; }   // da la vuelta
       sh.img.x += sh.vx * s;
       sh.img.y += sh.vy * s;
       sh.img.rotation += (SPIN[sh.fx] ?? 0) * s;
-      const tr = { x: sh.img.x, y: sh.img.y, vx: sh.vx, vy: sh.vy, fx: sh.fx, ox: sh.ox, oy: sh.oy, acc: sh.acc, age: sh.age };
+      if (sh.move.grow) sh.img.setScale(sh.move.size * (1 + (sh.move.grow - 1) * Math.min(1, sh.age / sh.move.life)));   // crece al alejarse
+      const tr = { x: sh.img.x, y: sh.img.y, vx: sh.vx, vy: sh.vy, fx: sh.fx, ox: sh.ox, oy: sh.oy, acc: sh.acc, age: sh.age, mul: sh.move.size };
       this.fx.trail(tr, s * 1000);
       sh.acc = tr.acc;
       sh.age += s * 1000;
@@ -585,9 +845,9 @@ export class BattleScene extends Phaser.Scene {
       let done = out || this.t > sh.dieAt;
       let hitSomething = false;
       const target = sh.owner === this.player ? this.enemy : this.player;
-      if (!done && !target.down && this.t >= target.invuln) {
+      if (!done && this.canHit(target)) {
         const d = Math.hypot(target.sprite.x - sh.img.x, target.sprite.y - sh.img.y);
-        if (d < R + 14 * sh.move.size) {
+        if (d < R + 14 * sh.img.scaleX) {
           this.hit(sh, target);
           hitSomething = true;
           done = true;
@@ -610,7 +870,7 @@ export class BattleScene extends Phaser.Scene {
       sh.img.x += sh.vx * s;
       sh.img.y += sh.vy * s;
       const target = owner === this.player ? this.enemy : this.player;
-      if (!target.down && this.t >= target.invuln) {
+      if (this.canHit(target)) {
         // punto más cercano del chorro (base -> punta) al rival
         const sx = sh.img.x - bx, sy = sh.img.y - by, l2 = sx * sx + sy * sy || 1;
         const u = Phaser.Math.Clamp(((target.sprite.x - bx) * sx + (target.sprite.y - by) * sy) / l2, 0, 1);
@@ -649,10 +909,11 @@ export class BattleScene extends Phaser.Scene {
 
     target.kb.add(new Phaser.Math.Vector2(dirx * 170 * kbMul, diry * 170 * kbMul));
 
-    this.fx.impact(mv.fx ?? 'slam', px, py, Math.atan2(diry, dirx));
+    this.fx.impact(mv.fx ?? 'slam', px, py, Math.atan2(diry, dirx), mv.power);
+    if (mv.hit) this.fx.play(mv.hit, target.sprite.x, target.sprite.y, Math.atan2(diry, dirx), mv.power, mv.type, owner.sprite.x, owner.sprite.y);   // garra, puño, mordisco...
     const strong = dmg >= target.team[target.active].maxHp * 0.1; // golpe fuerte
-    if (strong) this.cameras.main.shake(110, 0.004);
-    sfx.hit(mv.fx ?? 'slam', eff, crit, strong, target.sprite.x);
+    if (strong || mv.power >= 100) this.cameras.main.shake(strong ? 110 : 90, strong ? 0.004 : 0.0028);
+    sfx.hit(sfxKey(mv.fx ?? 'slam'), eff, crit, strong, target.sprite.x);
     target.sprite.setTint(0xff7777);
     this.time.delayedCall(110, () => target.sprite.clearTint());
 
@@ -679,6 +940,10 @@ export class BattleScene extends Phaser.Scene {
     side.down = true;
     sfx.faint(side.sprite.x);
     side.dash = null;
+    side.glow = null;
+    side.charging = null;
+    this.endLeap(side);
+    side.sprite.clearTint();
     side.sprite.setVisible(false);
     side.shadow.setVisible(false);
     side.arrow.setVisible(false);
@@ -709,6 +974,10 @@ export class BattleScene extends Phaser.Scene {
     side.lockUntil = 0;
     side.auraUntil = 0;
     side.dash = null;
+    side.glow = null;
+    side.charging = null;
+    this.endLeap(side);
+    side.sprite.clearTint();
     side.down = false;
     side.cd = [this.t + 300, this.t + 300, this.t + 300, this.t + 300];
     side.sprite.setVisible(true).setTexture(`${this.cur(side).def.id}-walk`, 0);
@@ -746,7 +1015,7 @@ export class BattleScene extends Phaser.Scene {
       ai.aimUntil = this.t + 500 + Math.random() * 500;
     }
     const ang = Math.atan2(dy, dx) + ai.aimErr;
-    if (!locked) e.facing.set(Math.cos(ang), Math.sin(ang));
+    if (!locked || e.charging) e.facing.set(Math.cos(ang), Math.sin(ang));
 
     if (this.t > ai.strafeUntil) {
       ai.strafe = Math.random() < 0.5 ? 1 : -1;
@@ -840,7 +1109,11 @@ export class BattleScene extends Phaser.Scene {
   // Elige el siguiente ataque del rival: varía entre los que le hacen buen daño, evita los que no
   // afectan, respeta PP y energía, y de vez en cuando se concentra para mejorar sus stats.
   private rangeOf(mv: Move): number {
-    return mv.style === 'dash' ? (mv.dash ?? 200) + R * 2 : mv.style === 'reach' ? (mv.reach ?? 150) + R : (mv.speed * mv.life) / 1000;
+    if (mv.style === 'dash') return (mv.dash ?? 200) + R * 2;
+    if (mv.style === 'reach') return (mv.reach ?? 150) + R;
+    if (mv.style === 'strike') return 450;
+    if (mv.style) return mv.range ?? 300;   // ataques de área
+    return (mv.speed * mv.life) / 1000;
   }
 
   private aiAttack(dist: number) {
@@ -854,6 +1127,9 @@ export class BattleScene extends Phaser.Scene {
     }
     const inRange = (mv: Move) => dist <= this.rangeOf(mv) * 0.9;
     const ready = (i: number) => mem.pp[i] > 0 && this.t >= e.cd[i] && mem.energy >= moves[i].cost;
+    // Ditto se transforma lo antes posible en cuanto puede.
+    const tf = moves.findIndex((mv, i) => mv.transform && ready(i));
+    if (tf >= 0 && this.tryFire(e, tf)) { ai.nextFire = this.t + 1500; return; }
     const dmg = moves.map((mv) =>
       mv.category === 'status' || !inRange(mv) ? 0 : calcDamage(fighter(mem), fighter(foe), mv, false, mem.stages, foe.stages).damage);
 
@@ -869,6 +1145,10 @@ export class BattleScene extends Phaser.Scene {
     }
 
     const cand = moves.map((_, i) => i).filter((i) => dmg[i] > 0 && ready(i));
+    if (!cand.length) {   // sin ataques que hagan daño (Magikarp): usa el que no hace nada, de vez en cuando
+      const idle = moves.findIndex((mv, i) => mv.category === 'status' && !mv.transform && Object.keys(mv.boost ?? {}).length === 0 && ready(i));
+      if (idle >= 0 && this.tryFire(e, idle)) { ai.nextFire = this.t + 1200; return; }
+    }
     let pick = -1;
     if (cand.length) {
       const topC = Math.max(...cand.map((i) => dmg[i]));
@@ -921,7 +1201,9 @@ export class BattleScene extends Phaser.Scene {
       const step = side.moving ? Math.floor(this.t / 180) % 2 : 0; // alterna los 2 cuadros al caminar
       side.sprite.setTexture(`${this.cur(side).def.id}-walk`, walkRow(f) * 2 + step);
       side.sprite.setAlpha(this.t < side.invuln && Math.floor(this.t / 100) % 2 ? 0.4 : 1);
-      side.shadow.setPosition(side.sprite.x, side.sprite.y + 36);
+      side.sprite.setVisible(!side.hidden).setOrigin(0.5, 0.5 + side.lift / 96);   // la altura se dibuja moviendo el origen: la posición real no cambia
+      side.shadow.setPosition(side.sprite.x, side.sprite.y + 36).setVisible(!side.hidden);
+      side.arrow.setVisible(!side.hidden);
       side.arrow.setPosition(side.sprite.x + f.x * 62, side.sprite.y + f.y * 62).setRotation(Math.atan2(f.y, f.x));
       side.sprite.setDepth(10 + side.sprite.y / 1000);
       const glowing = this.t < side.auraUntil;
@@ -960,9 +1242,12 @@ export class BattleScene extends Phaser.Scene {
 
   private refreshMoveTexts() {
     const def = this.cur(this.player).def;
-    def.moves.forEach((mv, i) => {
-      this.moveTexts[i][1].setText(mv.name);
-      this.moveTexts[i][2].setText(`⚡${mv.cost}`);
+    this.moveTexts.forEach((texts, i) => {
+      const mv = def.moves[i];
+      texts.forEach((t) => t.setVisible(!!mv));   // las teclas sin ataque se ocultan
+      if (!mv) return;
+      texts[1].setText(mv.name);
+      texts[2].setText(`⚡${mv.cost}`);
     });
   }
 

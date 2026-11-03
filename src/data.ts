@@ -1,3 +1,5 @@
+import { MOVES, BOOSTS, SPECIES } from './roster';
+
 export type PType =
   | 'normal' | 'fire' | 'water' | 'grass' | 'electric'
   | 'ice' | 'poison' | 'flying' | 'psychic' | 'ghost'
@@ -21,7 +23,20 @@ export interface Move {
   boost?: Partial<Stages>; // mejoras de stats para quien lo usa (ataques de estado)
   lock?: number;     // ms que queda inmóvil quien lo usa
   fx?: string;        // efecto visual (ver fx.ts)
-  style?: 'dash' | 'reach'; // embestida con contacto / ataque de alcance corto (por defecto, proyectil)
+  // Forma del ataque (por defecto, proyectil): embestida con contacto, alcance corto o ataque de área
+  // (onda por el suelo, picos de roca, lluvia de rocas, onda expansiva alrededor del Pokémon, rayo del cielo).
+  style?: 'dash' | 'reach' | 'ground' | 'spikes' | 'rain' | 'nova' | 'strike' | 'wave' | 'storm' | 'leap';
+  range?: number;     // alcance de los ataques de área, en px
+  multi?: number;     // cantidad de proyectiles lanzados en abanico
+  spread?: number;    // ángulo entre proyectiles contiguos, en radianes
+  boomerang?: boolean; // el proyectil da la vuelta a mitad de camino
+  transform?: boolean; // se transforma en el rival (Transformación)
+  hit?: string;       // animación que se suma sobre el rival al conectar un ataque de contacto (ver hitfx.ts)
+  tint?: number;      // color con el que se tiñe quien ataca mientras dura el ataque (Enfado)
+  grow?: number;      // el proyectil crece hasta este múltiplo de su tamaño mientras vuela
+  charge?: number;    // ms que se queda cargando antes de lanzarlo (se puede ir apuntando)
+  lob?: number;       // proyectil lanzado en arco que explota al caer, con este radio de daño
+  leap?: 'fly' | 'dig' | 'bounce'; // ataque en dos tiempos: desaparece, marca dónde va a caer y cae
   dash?: number;      // px que recorre la embestida
   reach?: number;     // px de alcance del ataque corto
   typeless?: boolean; // sin tipo: ignora STAB y efectividad (Forcejeo)
@@ -48,7 +63,7 @@ export interface PokemonDef {
   stats: Stats;    // stats calculados al nivel de combate
   maxHp: number;   // PS en combate (stat de PS x HP_MULT)
   speed: number;   // px/s de movimiento con el stat de velocidad sin modificar
-  moves: [Move, Move, Move, Move]; // teclas U, I, O, P
+  moves: Move[];      // hasta 4 ataques, en las teclas U, I, O, P
 }
 
 export const LEVEL = 50;
@@ -183,7 +198,7 @@ const RAW: Raw[] = [
     base: { hp: 78, atk: 84, def: 78, spa: 109, spd: 85, spe: 100 },
     moves: [
       mv('Ascuas', 'fire', 'special', 40, 25, 22, 1100, 480, 800, 0.7, 'ember'),
-      mv('Ataque Ala', 'flying', 'physical', 60, 35, 31, 1700, 560, 650, 0.9, 'wing', { style: 'dash', dash: 260 }),
+      mv('Ataque Ala', 'flying', 'physical', 60, 35, 31, 1700, 560, 650, 0.9, 'wing', { style: 'dash', dash: 260, hit: 'wing' }),
       mv('Lanzallamas', 'fire', 'special', 90, 15, 42, 2600, 420, 1000, 1.3, 'flame'),
       st('Danza Espada', 'normal', 20, STATUS_COST, { atk: 2 }),
     ],
@@ -192,8 +207,8 @@ const RAW: Raw[] = [
     id: 'blastoise', name: 'Blastoise', types: ['water'],
     base: { hp: 79, atk: 83, def: 100, spa: 85, spd: 105, spe: 78 },
     moves: [
-      mv('Pistola Agua', 'water', 'special', 40, 25, 22, 1100, 500, 800, 0.7, 'water'),
-      mv('Rayo Hielo', 'ice', 'special', 90, 10, 42, 2500, 560, 900, 0.9, 'ice'),
+      mv('Pistola Agua', 'water', 'special', 40, 25, 22, 1100, 500, 800, 0.7, 'jet'),
+      mv('Rayo Hielo', 'ice', 'special', 90, 10, 42, 2500, 360, 900, 0.9, 'icebeam'),
       mv('Hidrobomba', 'water', 'special', 110, 5, 49, 3200, 400, 1000, 1.4, 'hydro'),
       st('Defensa Férrea', 'normal', 15, STATUS_COST, { def: 2 }),
     ],
@@ -203,19 +218,19 @@ const RAW: Raw[] = [
     base: { hp: 80, atk: 82, def: 83, spa: 100, spd: 100, spe: 80 },
     moves: [
       st('Desarrollo', 'normal', 20, STATUS_COST, { atk: 1, spa: 1 }),
-      mv('Hoja Afilada', 'grass', 'physical', 55, 25, 29, 1500, 640, 800, 0.8, 'leaf'),
-      mv('Rayo Solar', 'grass', 'special', 120, 10, 52, 3200, 430, 1000, 1.4, 'solar'),
-      mv('Bomba Lodo', 'poison', 'special', 90, 10, 42, 2500, 450, 900, 1.0, 'sludge'),
+      mv('Hoja Afilada', 'grass', 'physical', 55, 25, 29, 1500, 800, 650, 0.8, 'razor'),
+      mv('Rayo Solar', 'grass', 'special', 120, 10, 52, 3200, 700, 1000, 1.4, 'solar', { charge: 1800 }),
+      mv('Bomba Lodo', 'poison', 'special', 90, 10, 42, 2500, 450, 900, 1.6, 'sludgebomb'),
     ],
   },
   {
     id: 'pikachu', name: 'Pikachu', types: ['electric'],
     base: { hp: 35, atk: 55, def: 40, spa: 50, spd: 50, spe: 90 },
     moves: [
-      mv('Impactrueno', 'electric', 'special', 40, 30, 22, 1000, 620, 750, 0.6, 'spark'),
+      mv('Impactrueno', 'electric', 'special', 40, 30, 22, 1000, 620, 750, 0.6, 'zap'),
       st('Agilidad', 'psychic', 30, STATUS_COST, { spe: 2 }),
       mv('Rayo', 'electric', 'special', 90, 15, 42, 2400, 700, 900, 1.0, 'bolt'),
-      mv('Trueno', 'electric', 'special', 110, 10, 49, 3000, 480, 1000, 1.1, 'thunder'),
+      mv('Trueno', 'electric', 'special', 110, 10, 49, 3000, 0, 0, 1, 'thunder', { style: 'strike' }),
     ],
   },
   {
@@ -224,7 +239,7 @@ const RAW: Raw[] = [
     moves: [
       mv('Confusión', 'psychic', 'special', 50, 25, 26, 1300, 520, 850, 0.8, 'psy'),
       mv('Psíquico', 'psychic', 'special', 90, 10, 42, 2500, 480, 1000, 1.2, 'psychic'),
-      mv('Bola Sombra', 'ghost', 'special', 80, 15, 38, 2200, 500, 950, 1.0, 'shadow'),
+      mv('Bola Sombra', 'ghost', 'special', 80, 15, 38, 2200, 500, 950, 1.5, 'ghost'),
       st('Paz Mental', 'psychic', 20, STATUS_COST, { spa: 1, spd: 1 }),
     ],
   },
@@ -233,8 +248,8 @@ const RAW: Raw[] = [
     base: { hp: 60, atk: 65, def: 60, spa: 130, spd: 75, spe: 110 },
     moves: [
       mv('Lengüetazo', 'ghost', 'physical', 30, 30, 18, 900, 520, 650, 0.7, 'lick', { style: 'reach', reach: 190 }),
-      mv('Bola Sombra', 'ghost', 'special', 80, 15, 38, 2200, 500, 950, 1.0, 'shadow'),
-      mv('Bomba Lodo', 'poison', 'special', 90, 10, 42, 2500, 460, 900, 1.0, 'sludge'),
+      mv('Bola Sombra', 'ghost', 'special', 80, 15, 38, 2200, 500, 950, 1.5, 'ghost'),
+      mv('Bomba Lodo', 'poison', 'special', 90, 10, 42, 2500, 460, 900, 1.6, 'sludgebomb'),
       st('Maquinación', 'psychic', 20, STATUS_COST, { spa: 2 }),
     ],
   },
@@ -242,9 +257,9 @@ const RAW: Raw[] = [
     id: 'wigglytuff', name: 'Wigglytuff', types: ['normal', 'fairy'],
     base: { hp: 140, atk: 70, def: 45, spa: 85, spd: 50, spe: 45 },
     moves: [
-      mv('Voz Cautivadora', 'fairy', 'special', 40, 15, 22, 1100, 520, 800, 0.8, 'fairy'),
-      mv('Golpe Cuerpo', 'normal', 'physical', 85, 15, 40, 2300, 0, 0, 1, 'slam', { style: 'dash', dash: 240 }),
-      mv('Fuerza Lunar', 'fairy', 'special', 95, 15, 43, 2600, 420, 1000, 1.3, 'fairy'),
+      mv('Voz Cautivadora', 'fairy', 'special', 40, 15, 22, 1100, 0, 0, 1, 'notes', { style: 'nova', range: 210 }),
+      mv('Golpe Cuerpo', 'normal', 'physical', 85, 15, 40, 2300, 0, 0, 1, 'slam', { style: 'dash', dash: 240, hit: 'bigimpact' }),
+      mv('Fuerza Lunar', 'fairy', 'special', 95, 15, 43, 2600, 420, 1000, 1.4, 'moon'),
       st('Paz Mental', 'psychic', 20, STATUS_COST, { spa: 1, spd: 1 }),
     ],
   },
@@ -252,9 +267,9 @@ const RAW: Raw[] = [
     id: 'machamp', name: 'Machamp', types: ['fighting'],
     base: { hp: 90, atk: 130, def: 80, spa: 65, spd: 85, spe: 55 },
     moves: [
-      mv('Puño Bala', 'steel', 'physical', 40, 30, 22, 1100, 0, 0, 1, 'steel', { style: 'dash', dash: 200 }),
-      mv('Demolición', 'fighting', 'physical', 75, 15, 36, 2000, 0, 0, 1, 'punch', { style: 'dash', dash: 230 }),
-      mv('Puño Dinámico', 'fighting', 'physical', 100, 5, 46, 2800, 0, 0, 1, 'punch', { style: 'dash', dash: 260 }),
+      mv('Puño Bala', 'steel', 'physical', 40, 30, 22, 1100, 0, 0, 1, 'steel', { style: 'dash', dash: 200, hit: 'fist' }),
+      mv('Demolición', 'fighting', 'physical', 75, 15, 36, 2000, 0, 0, 1, 'punch', { style: 'dash', dash: 230, hit: 'bricks' }),
+      mv('Puño Dinámico', 'fighting', 'physical', 100, 5, 46, 2800, 0, 0, 1, 'punch', { style: 'dash', dash: 260, hit: 'dynpunch' }),
       st('Corpulencia', 'fighting', 20, STATUS_COST, { atk: 1, def: 1 }),
     ],
   },
@@ -263,8 +278,8 @@ const RAW: Raw[] = [
     base: { hp: 80, atk: 120, def: 130, spa: 55, spd: 65, spe: 45 },
     moves: [
       mv('Lanzarrocas', 'rock', 'physical', 50, 15, 26, 1300, 520, 800, 0.9, 'rock'),
-      mv('Avalancha', 'rock', 'physical', 75, 10, 36, 2000, 480, 900, 1.2, 'rock'),
-      mv('Terremoto', 'ground', 'physical', 100, 10, 46, 2800, 380, 1000, 1.4, 'earth'),
+      mv('Avalancha', 'rock', 'physical', 75, 10, 36, 2000, 0, 0, 1, 'rock', { style: 'rain', range: 440 }),
+      mv('Terremoto', 'ground', 'physical', 100, 10, 46, 2800, 0, 0, 1, 'earth', { style: 'ground', range: 540 }),
       st('Defensa Férrea', 'steel', 15, STATUS_COST, { def: 2 }),
     ],
   },
@@ -272,23 +287,46 @@ const RAW: Raw[] = [
     id: 'lapras', name: 'Lapras', types: ['water', 'ice'],
     base: { hp: 130, atk: 85, def: 80, spa: 85, spd: 95, spe: 60 },
     moves: [
-      mv('Canto Helado', 'ice', 'physical', 40, 30, 22, 1000, 640, 700, 0.8, 'ice'),
-      mv('Surf', 'water', 'special', 90, 15, 42, 2500, 420, 1000, 1.3, 'hydro'),
-      mv('Rayo Hielo', 'ice', 'special', 90, 10, 42, 2500, 560, 900, 0.9, 'ice'),
-      mv('Ventisca', 'ice', 'special', 110, 5, 49, 3000, 420, 1000, 1.3, 'blizzard'),
+      mv('Canto Helado', 'ice', 'physical', 40, 30, 22, 1000, 640, 700, 0.9, 'note'),
+      mv('Surf', 'water', 'special', 90, 15, 42, 2500, 0, 0, 1, 'hydro', { style: 'wave', range: 560 }),
+      mv('Rayo Hielo', 'ice', 'special', 90, 10, 42, 2500, 360, 900, 0.9, 'icebeam'),
+      mv('Ventisca', 'ice', 'special', 110, 5, 49, 3000, 0, 0, 1, 'blizzard', { style: 'storm', range: 560 }),
     ],
   },
   {
     id: 'dragonite', name: 'Dragonite', types: ['dragon', 'flying'],
     base: { hp: 91, atk: 134, def: 95, spa: 100, spd: 100, spe: 80 },
     moves: [
-      mv('Ataque Ala', 'flying', 'physical', 60, 35, 31, 1700, 0, 0, 1, 'wing', { style: 'dash', dash: 230 }),
-      mv('Garra Dragón', 'dragon', 'physical', 80, 15, 38, 2200, 0, 0, 1, 'dragon', { style: 'dash', dash: 250 }),
-      mv('Pulso Dragón', 'dragon', 'special', 85, 10, 40, 2400, 420, 1000, 1.3, 'dragon'),
+      mv('Ataque Ala', 'flying', 'physical', 60, 35, 31, 1700, 0, 0, 1, 'wing', { style: 'dash', dash: 230, hit: 'wing' }),
+      mv('Garra Dragón', 'dragon', 'physical', 80, 15, 38, 2200, 0, 0, 1, 'dragon', { style: 'dash', dash: 250, hit: 'dragonclaw' }),
+      mv('Pulso Dragón', 'dragon', 'special', 85, 10, 40, 2400, 420, 1000, 1.5, 'dragon'),
       st('Danza Dragón', 'dragon', 20, STATUS_COST, { atk: 1, spe: 1 }),
     ],
   },
 ];
+
+// Convierte un ataque del catálogo de `roster.ts` en un `Move`. Costo, recarga y datos del proyectil salen del poder,
+// siguiendo la escala de los ataques de arriba (poder 40 = 22 de energía y ~1 s; poder 120 = ~54 y ~3,3 s).
+function fromCatalog(key: string): Move {
+  const boost = BOOSTS[key];
+  if (boost) return { ...st(boost[0], boost[1], boost[2], STATUS_COST, boost[3]), ...(key === 'transform' ? { transform: true } : {}) };
+  const [name, type, cat, power, pp, fx, shape, extra = {}] = MOVES[key];
+  const category = cat as 'physical' | 'special';
+  const cost = Math.min(60, Math.max(14, Math.round(6 + power * 0.4)));
+  const cooldown = Math.min(3800, Math.max(800, Math.round(1000 + (power - 40) * 29)));
+  const over = Math.max(0, power - 40);
+  if (shape === 'd') return mv(name, type, category, power, pp, cost, cooldown, 0, 0, 1, fx, { style: 'dash', dash: Math.round(200 + over * 0.7), ...extra });
+  if (shape === 'r') return mv(name, type, category, power, pp, cost, cooldown, 520, 650, 0.7, fx, { style: 'reach', reach: 190, ...extra });
+  const area = { g: ['ground', 540], s: ['spikes', 420], a: ['rain', 440], n: ['nova', 230], t: ['strike', 0], w: ['wave', 560], b: ['storm', 560], l: ['leap', 500] }[shape as 'g' | 's' | 'a' | 'n' | 't' | 'w' | 'b' | 'l'];
+  if (area) return mv(name, type, category, power, pp, cost, cooldown, 0, 0, 1, fx, { style: area[0] as Move['style'], range: area[1] as number, ...extra });
+  const size = Math.round((0.7 + over * 0.0095) * 100) / 100;
+  return mv(name, type, category, power, pp, cost, cooldown, Math.round(520 - over * 1.1), Math.round(750 + over * 3), size, fx, extra);
+}
+
+// Las especies con pocos ataques (Metapod, Magikarp, Ditto...) simplemente tienen menos de 4.
+const EXTRA_RAW: Raw[] = SPECIES.map(([id, name, , types, b, , keys]) => ({
+  id, name, types, base: { hp: b[0], atk: b[1], def: b[2], spa: b[3], spd: b[4], spe: b[5] }, moves: keys.map(fromCatalog),
+}));
 
 // Números de Pokédex oficiales. Al sumar un combatiente, agrega también su número aquí.
 const DEX: Record<string, number> = {
@@ -302,7 +340,9 @@ const CATCH: Record<string, number> = {
 };
 
 /** Todos los combatientes, ordenados por número de Pokédex. */
-export const POKEMON: PokemonDef[] = RAW.map((r) => {
+for (const [id, , dex, , , catchRate] of SPECIES) { DEX[id] = dex; CATCH[id] = catchRate; }
+
+export const POKEMON: PokemonDef[] = [...RAW, ...EXTRA_RAW].map((r) => {
   const stats = statsAt(r.base, LEVEL);
   return {
     ...r, dex: DEX[r.id], level: LEVEL, catchRate: CATCH[r.id] ?? 45, stats,

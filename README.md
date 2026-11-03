@@ -14,6 +14,27 @@ Juego 2D de arena en tiempo real con Pokémon: te mueves libremente, lanzas ataq
 
 Menú de pausa: cambiar de Pokémon y usar objetos (Poción, Éter).
 
+Están los **151 Pokémon de la primera generación**. Los 11 primeros que se hicieron (Venusaur, Charizard, Blastoise, Pikachu,
+Wigglytuff, Alakazam, Machamp, Golem, Gengar, Lapras y Dragonite) tienen ataques y efectos ajustados a mano en
+`src/data.ts`; los otros 140 salen de `src/roster.ts`: stats base y tipos actuales, 4 ataques que cada especie aprende de
+verdad en los juegos, y costo, recarga y proyectil calculados a partir del poder del ataque. Para cambiar un ataque o una
+especie basta editar esa tabla. Las especies con muy pocos ataques tienen menos de 4: Magikarp solo
+Salpicadura (que no hace nada) y Ditto solo Transformación, que lo convierte en el rival durante toda la batalla.
+
+### Animaciones de los ataques
+Los ataques de contacto rodean al Pokémon con efectos de su tipo (llamas, rayos, burbujas, hojas...), y cuanto más poder
+tiene un ataque, más grande es el aura, el destello al lanzarlo y el impacto. Al conectar se suma una animación propia
+sobre el rival (`hit` en `src/roster.ts`, dibujadas en `src/hitfx.ts`): garras, puños de cada tipo, mordiscos, cuernos,
+una X de cuchillas, un martillo de agua, ladrillos que saltan, etc. El listado completo, ataque por ataque, está en
+[docs/ATAQUES.md](docs/ATAQUES.md). Además hay ataques con forma propia (`style` en `src/data.ts`):
+
+- **Terremoto** (grieta por el suelo), **Roca Afilada** (peñascos irregulares), **Avalancha** (rocas con sombra que avisa).
+- **Surf** (ola ancha en una dirección), **Ventisca** (tormenta que avanza), **Trueno** (marca y rayo del cielo).
+- **Vuelo, Bote y Excavar**: el Pokémon desaparece, una marca avisa dónde caerá y luego cae haciendo daño.
+- **Ondas expansivas** (Onda Ígnea, Danza Pétalo, Zumbido, Voz Cautivadora, Come Sueños, Onda Mental...).
+- **Rayo Solar** se carga ~1,8 s (se puede apuntar) y **Bomba Huevo** se lanza en arco y explota al caer.
+- Chorros y proyectiles con diseño propio: Rayo Hielo, Hiperrayo, Pulso Umbrío, Látigo Cepa, Tornado, Llamarada...
+
 Para sumar más combatientes, mira [docs/AGREGAR-POKEMON.md](docs/AGREGAR-POKEMON.md).
 
 ## Capturar Pokémon salvajes

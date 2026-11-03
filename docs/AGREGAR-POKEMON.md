@@ -1,5 +1,8 @@
 # Cómo agregar un Pokémon al juego
 
+> Para una especie sencilla basta una fila en `SPECIES` de `src/roster.ts` (id, nombre, Pokédex, tipos, stats base, índice de
+> captura y 4 ataques del catálogo `MOVES`/`BOOSTS`). Lo de abajo explica el método manual con ataques a medida.
+
 El juego ya soporta más de 6 combatientes: la selección de equipo es una cuadrícula que se ordena por número de
 Pokédex, y están los 18 tipos con su tabla de efectividad. Para sumar uno hacen falta tres cosas.
 
