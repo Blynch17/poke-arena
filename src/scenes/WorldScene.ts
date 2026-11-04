@@ -1,4 +1,6 @@
 import Phaser from 'phaser';
+import { POKEMON, maxUses } from '../data';
+import { Entry, teamCards, dataPanel, CARD_H, CARD_GAP } from '../teamui';
 import { buildRoute, TILE, MAP_W, MAP_H, ROUTE_NAME, isWalkable, pickEncounter, RouteMap, RIVAL } from '../route';
 import { music } from '../music';
 import { sfx } from '../sfx';
@@ -12,7 +14,28 @@ const TURN_MS = 110;        // girar en el lugar antes de avanzar, como en los j
 const ENCOUNTER_RATE = 0.14; // probabilidad de encuentro por paso en hierba alta
 const SAFE_STEPS = 3;       // pasos sin encuentros al volver de una batalla
 
-export interface WorldData { team?: number[]; tx?: number; ty?: number; dir?: Dir; result?: 'win' | 'lose' }
+export interface WorldData { team?: number[]; tx?: number; ty?: number; dir?: Dir; result?: 'win' | 'lose'; out?: number[] }
+
+// Un Pokémon que anda por la ruta junto al entrenador: camina por casillas, sigue al jugador si este se aleja y
+// deambula solo cuando está cerca.
+interface Follower {
+  id: number;                // índice en POKEMON
+  img: Phaser.GameObjects.Image;
+  tx: number; ty: number;
+  dir: Dir;
+  mv: { fx: number; fy: number; tx: number; ty: number; t: number } | null;
+  wait: number;              // ms hasta que elija otro destino
+  goal: [number, number] | null; // casilla a la que va caminando
+  away: number;              // ms seguidos lejos del jugador
+  returning: boolean;        // vuelve hacia el jugador hasta quedar cerca
+}
+const FOLLOW_STEP_MS = 230;  // un poco más lento que el jugador (200), para que se queden un paso atrás
+const RETURN_STEP_MS = 170;  // pero más rápido que él cuando vuelven, para alcanzarlo
+const FOLLOW_NEAR = 2;       // al volver paran a esta distancia del jugador
+const NEAR_AWAY = 4;         // más lejos que esto cuenta como "lejos"
+const AWAY_MAX = 6000;       // tras tanto tiempo lejos, vuelven sí o sí
+const MAX_DIST = 14;         // o si se alejan tanto (más allá de la pantalla)
+const STILL_MS = 800;        // el jugador cuenta como quieto tras este tiempo sin caminar
 
 let rivalBeaten = false;   // dura mientras no se salga de la aventura
 
@@ -35,6 +58,12 @@ export class WorldScene extends Phaser.Scene {
   private waterT = 0;
   private menuOpen = false;
   private menuIdx = 0;
+  private menuScreen: 'main' | 'options' | 'team' | 'actions' | 'data' | 'move' = 'main';
+  private menuSel = 0;      // Pokémon elegido en la pantalla Pokémon
+  private menuMsg = '';
+  private followers: Follower[] = [];
+  private outIds: number[] = [];   // Pokémon que están fuera, por índice en POKEMON
+  private stillMs = 0;             // hace cuánto no camina el jugador
   private menuLayer!: Phaser.GameObjects.Container;
   private busy = false;          // transición hacia la batalla
   private safeSteps = 0;
@@ -62,6 +91,12 @@ export class WorldScene extends Phaser.Scene {
     this.path = [];
     this.menuOpen = false;
     this.menuIdx = 0;
+    this.menuScreen = 'main';
+    this.menuSel = 0;
+    this.menuMsg = '';
+    this.followers = [];
+    this.stillMs = 0;
+    this.outIds = back ? [...(data.out ?? [])] : [];
     this.busy = false;
     this.safeSteps = back ? SAFE_STEPS : 0;
     this.challenged = false;
@@ -83,6 +118,7 @@ export class WorldScene extends Phaser.Scene {
     this.grassOver = this.add.image(0, 0, 'tile-tall-over').setOrigin(0, 0).setScale(2).setVisible(false);
     this.pathMark = this.add.graphics().setDepth(5);
     this.updateGrassOver(this.tx, this.ty);
+    this.outIds.forEach((id) => this.spawnFollower(id, false));   // los que estaban fuera siguen fuera al volver de una batalla
 
     const cam = this.cameras.main;
     cam.setBounds(0, 0, MAP_W * TILE, MAP_H * TILE);
@@ -149,6 +185,7 @@ export class WorldScene extends Phaser.Scene {
     }
     if (this.menuOpen || this.busy) return;
     this.now += delta;
+    this.updateFollowers(delta);
     if (this.moving) this.advance(delta);
     else this.tryStart();
   }
@@ -250,8 +287,110 @@ export class WorldScene extends Phaser.Scene {
     const e = pickEncounter(Math.random());
     this.scene.start('Battle', {
       team: this.team, wild: true, wildId: e.id, wildLevel: e.level,
-      returnTo: { team: this.team, tx: this.tx, ty: this.ty, dir: this.dir },
+      returnTo: { team: this.team, tx: this.tx, ty: this.ty, dir: this.dir, out: this.outIds },
     });
+  }
+
+
+  // ---------- Pokémon fuera de su bola ----------
+
+  private isOut(id: number) { return this.outIds.includes(id); }
+
+  /** Casilla del jugador, o a la que va si está caminando. */
+  private playerTile(): [number, number] { return this.moving ? [this.moving.tx, this.moving.ty] : [this.tx, this.ty]; }
+
+  private occupied(x: number, y: number, self?: Follower) {
+    const [px, py] = this.playerTile();
+    if ((x === px && y === py) || (x === this.tx && y === this.ty)) return true;
+    return this.followers.some((f) => f !== self && ((f.tx === x && f.ty === y) || (f.mv && f.mv.tx === x && f.mv.ty === y)));
+  }
+
+  /** Saca o guarda un Pokémon: el que sale aparece junto al entrenador. */
+  private toggleOut(id: number) {
+    if (this.isOut(id)) {
+      this.outIds = this.outIds.filter((o) => o !== id);
+      const f = this.followers.find((q) => q.id === id);
+      this.followers = this.followers.filter((q) => q.id !== id);
+      if (f) this.tweens.add({ targets: f.img, scale: 0, alpha: 0, duration: 220, onComplete: () => f.img.destroy() });
+    } else {
+      this.outIds.push(id);
+      this.spawnFollower(id, true);
+    }
+  }
+
+  private spawnFollower(id: number, pop: boolean) {
+    const [px, py] = this.playerTile();
+    const back = VEC[this.dir];
+    // la casilla libre más cercana al jugador, empezando por la de atrás
+    const cands: [number, number][] = [[px - back[0], py - back[1]], [px + back[1], py - back[0]], [px - back[1], py + back[0]], [px + back[0], py + back[1]]];
+    for (let r = 2; r <= 3; r++) for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) if (Math.max(Math.abs(dx), Math.abs(dy)) === r) cands.push([px + dx, py + dy]);
+    const at = cands.find(([x, y]) => this.walkable(x, y) && !this.occupied(x, y)) ?? [px, py];
+    const img = this.add.image((at[0] + 0.5) * TILE, (at[1] + 1) * TILE, `${POKEMON[id].id}-walk`, ROW[this.dir] * 2).setOrigin(0.5, 1).setScale(2).setDepth((at[1] + 1) * TILE + 1);
+    const f: Follower = { id, img, tx: at[0], ty: at[1], dir: this.dir, mv: null, wait: 600 + Math.random() * 800, goal: null, away: 0, returning: false };
+    this.followers.push(f);
+    if (pop) { img.setScale(0.2).setAlpha(0.2); this.tweens.add({ targets: img, scale: 2, alpha: 1, duration: 260, ease: 'Back.easeOut' }); }
+  }
+
+  private followerStep(f: Follower, nx: number, ny: number) {
+    const dx = nx - f.tx, dy = ny - f.ty;
+    f.dir = dx > 0 ? 'right' : dx < 0 ? 'left' : dy > 0 ? 'down' : 'up';
+    f.mv = { fx: f.tx, fy: f.ty, tx: nx, ty: ny, t: 0 };
+  }
+
+  /** Destino al azar: con el jugador quieto, cualquier punto de la pantalla; caminando, cerca de él o lejos (hasta salir de la vista). */
+  private pickGoal(f: Follower): [number, number] | null {
+    const [px, py] = this.playerTile(), still = this.stillMs > STILL_MS, v = this.cameras.main.worldView;
+    const near = !still && Math.random() < 0.6;
+    for (let k = 0; k < 24; k++) {
+      let x: number, y: number;
+      if (still) { x = Phaser.Math.Between(Math.floor(v.x / TILE), Math.floor(v.right / TILE)); y = Phaser.Math.Between(Math.floor(v.y / TILE), Math.floor(v.bottom / TILE)); }
+      else { const r = near ? 3 : MAX_DIST - 2; x = px + Phaser.Math.Between(-r, r); y = py + Phaser.Math.Between(-r, r); }
+      if (!this.walkable(x, y) || this.occupied(x, y, f) || (x === f.tx && y === f.ty)) continue;
+      if (this.findPath([f.tx, f.ty], [x, y])) return [x, y];
+    }
+    return null;
+  }
+
+  private updateFollowers(dt: number) {
+    this.stillMs = this.moving ? 0 : this.stillMs + dt;
+    const [px, py] = this.playerTile();
+    for (const f of this.followers) {
+      const dist = Math.abs(f.tx - px) + Math.abs(f.ty - py);
+      f.away = dist > NEAR_AWAY ? f.away + dt : 0;
+      if (!f.returning && (f.away > AWAY_MAX || dist > MAX_DIST)) { f.returning = true; f.goal = null; }   // pueden alejarse, pero siempre vuelven
+      if (f.mv) {
+        const ms = f.returning ? RETURN_STEP_MS : FOLLOW_STEP_MS;
+        f.mv.t += dt;
+        const k = Math.min(1, f.mv.t / ms);
+        const x = Phaser.Math.Linear((f.mv.fx + 0.5) * TILE, (f.mv.tx + 0.5) * TILE, k), y = Phaser.Math.Linear((f.mv.fy + 1) * TILE, (f.mv.ty + 1) * TILE, k);
+        f.img.setPosition(x, y).setDepth(y + 1).setFrame(ROW[f.dir] * 2 + (k < 0.5 ? 1 : 0));
+        if (k >= 1) { f.tx = f.mv.tx; f.ty = f.mv.ty; f.mv = null; f.img.setFrame(ROW[f.dir] * 2); }
+        continue;
+      }
+      if (f.tx === px && f.ty === py) {   // el jugador se le subió encima: se aparta
+        const opts = (Object.values(VEC) as [number, number][]).map(([dx, dy]) => [f.tx + dx, f.ty + dy] as [number, number]).filter(([x, y]) => this.walkable(x, y) && !this.occupied(x, y, f));
+        if (opts.length) { const [x, y] = Phaser.Utils.Array.GetRandom(opts); this.followerStep(f, x, y); }
+        continue;
+      }
+      if (f.returning) {   // vuelve junto al jugador por el camino más corto
+        if (dist <= FOLLOW_NEAR) { f.returning = false; f.away = 0; f.wait = 600; continue; }
+        const path = this.findPath([f.tx, f.ty], [px, py]);
+        if (path && path.length > 1 && !this.occupied(path[0][0], path[0][1], f)) this.followerStep(f, path[0][0], path[0][1]);
+        continue;
+      }
+      if (f.goal) {   // camina hacia su destino
+        const [gx, gy] = f.goal;
+        if (f.tx === gx && f.ty === gy) { f.goal = null; f.wait = 800 + Math.random() * 2200; continue; }
+        const path = this.findPath([f.tx, f.ty], [gx, gy]);
+        if (path && path.length && !this.occupied(path[0][0], path[0][1], f)) this.followerStep(f, path[0][0], path[0][1]);
+        else { f.goal = null; f.wait = 400; }   // se le cruzó algo: elige otro destino
+        continue;
+      }
+      f.wait -= dt;
+      if (f.wait > 0) continue;
+      f.goal = Math.random() < 0.85 ? this.pickGoal(f) : null;
+      if (!f.goal) { f.wait = 700 + Math.random() * 1500; f.dir = Phaser.Utils.Array.GetRandom(['up', 'down', 'left', 'right'] as Dir[]); f.img.setFrame(ROW[f.dir] * 2); }   // a veces solo mira a otro lado
+    }
   }
 
   // ---------- entrenador rival ----------
@@ -302,7 +441,7 @@ export class WorldScene extends Phaser.Scene {
     this.time.delayedCall(1700, () => { box.destroy(); txt.destroy(); this.cameras.main.flash(160, 255, 255, 255); });
     this.time.delayedCall(2100, () => this.scene.start('Battle', {
       team: this.team, trainer: RIVAL.name,
-      returnTo: { team: this.team, tx: this.tx, ty: this.ty, dir: this.dir },
+      returnTo: { team: this.team, tx: this.tx, ty: this.ty, dir: this.dir, out: this.outIds },
     }));
   }
 
@@ -343,45 +482,93 @@ export class WorldScene extends Phaser.Scene {
 
   private menuItems(): string[] {
     const bar = (v: number) => `${'█'.repeat(v)}${'░'.repeat(10 - v)} ${v}`;
-    return [
-      'Continuar',
-      `Música    ${bar(settings.music)}`,
-      `Efectos   ${bar(settings.sfx)}`,
-      `Controles: ${settings.controls === 'keys' ? 'Teclado' : 'Mouse'}`,
-      'Salir al menú de equipos',
-    ];
+    if (this.menuScreen === 'options') {
+      return [`Música    ${bar(settings.music)}`, `Efectos   ${bar(settings.sfx)}`, `Controles: ${settings.controls === 'keys' ? 'Teclado' : 'Mouse'}`, 'Atrás'];
+    }
+    if (this.menuScreen === 'actions') return ['Datos', 'Mover', this.isOut(this.team[this.menuSel]) ? 'Guardar Pokémon' : 'Sacar Pokémon', 'Atrás'];
+    return ['Continuar', 'Pokémon', 'Opciones', 'Salir al menú de equipos'];
+  }
+
+  // Mis Pokémon, en el orden en que saldrán a pelear. Sus PS y PP vuelven a estar completos en cada batalla.
+  private teamEntries(): Entry[] {
+    return this.team.map((i, k) => {
+      const def = POKEMON[i];
+      return { def, level: def.level, hp: def.maxHp, maxHp: def.maxHp, stats: def.stats, pp: def.moves.map(maxUses), tag: [k === 0 ? 'abre las batallas' : '', this.isOut(i) ? 'fuera' : ''].filter(Boolean).join(' · ') || undefined };
+    });
+  }
+
+  private openMenuScreen(screen: 'main' | 'options' | 'team' | 'actions' | 'data' | 'move', idx = 0) {
+    this.menuScreen = screen;
+    this.menuIdx = idx;
+    this.menuMsg = '';
   }
 
   private renderMenu() {
     this.menuLayer.removeAll(true);
     if (!this.menuOpen) return;
+    const scr = this.menuScreen;
+    if (scr === 'team' || scr === 'actions' || scr === 'data' || scr === 'move') { this.renderTeamMenu(); return; }
     const items = this.menuItems();
     const h = 130 + items.length * 40, y0 = 320 - h / 2;
     const objs: Phaser.GameObjects.GameObject[] = [
       this.add.rectangle(480, 320, 960, 640, 0x000000, 0.45),
       this.add.rectangle(480, 320, 580, h, 0x1b2a1e).setStrokeStyle(4, 0xffd23f),
-      this.add.text(480, y0 + 28, 'MENÚ', { fontSize: '26px', color: '#ffd23f', fontStyle: 'bold' }).setOrigin(0.5),
+      this.add.text(480, y0 + 28, scr === 'options' ? 'OPCIONES' : 'MENÚ', { fontSize: '26px', color: '#ffd23f', fontStyle: 'bold' }).setOrigin(0.5),
     ];
     items.forEach((t, i) => {
       objs.push(this.add.text(214, y0 + 66 + i * 40, `${i === this.menuIdx ? '▶ ' : '  '}${t}`, {
         fontSize: '22px', color: i === this.menuIdx ? '#ffffff' : '#9fb8a6',
       }));
     });
-    objs.push(this.add.text(480, y0 + h - 22, '↑ ↓ mover · ← → volumen · ENTER aceptar · ESC cerrar', { fontSize: '15px', color: '#cfe8cf' }).setOrigin(0.5));
+    const hint = scr === 'options' ? '↑ ↓ mover · ← → volumen · ENTER cambiar · ESC volver' : '↑ ↓ mover · ENTER aceptar · ESC cerrar';
+    objs.push(this.add.text(480, y0 + h - 22, hint, { fontSize: '15px', color: '#cfe8cf' }).setOrigin(0.5));
+    this.menuLayer.add(objs);
+  }
+
+  // Pantalla Pokémon: tarjetas con imagen, nivel y PS. Al elegir uno: "Datos" o "Mover" (intercambia su lugar con otro).
+  private renderTeamMenu() {
+    const scr = this.menuScreen, entries = this.teamEntries(), n = entries.length;
+    const objs: Phaser.GameObjects.GameObject[] = [this.add.rectangle(480, 320, 960, 640, 0x000000, 0.6)];
+    if (scr === 'data') {
+      objs.push(...dataPanel(this, entries[this.menuSel], 480, 320));
+      this.menuLayer.add(objs);
+      return;
+    }
+    const options = this.menuItems();
+    const rows = scr === 'actions' ? 1 : n, listH = rows * (CARD_H + CARD_GAP);
+    const extra = scr === 'team' ? 46 : scr === 'actions' ? options.length * 40 + 8 : 0;
+    const h = 100 + listH + extra + 36, y0 = 320 - h / 2;
+    const hint = this.menuMsg || (scr === 'move' ? 'Elige con quién intercambiar su lugar · ENTER confirmar · ESC cancelar' : scr === 'team' ? '↑ ↓ elegir · ENTER abrir opciones · el primero abre las batallas · ESC volver' : '↑ ↓ mover · ENTER aceptar · ESC volver');
+    objs.push(this.add.rectangle(480, 320, 640, h, 0x1b2a1e).setStrokeStyle(4, 0xffd23f));
+    objs.push(this.add.text(480, y0 + 26, scr === 'move' ? 'MOVER A…' : 'POKÉMON', { fontSize: '26px', color: '#ffd23f', fontStyle: 'bold' }).setOrigin(0.5));
+    if (scr === 'actions') {
+      objs.push(...teamCards(this, [entries[this.menuSel]], -1, 480, y0 + 56, 580));
+      options.forEach((o, i) => objs.push(this.add.text(214, y0 + 56 + listH + 4 + i * 40, `${i === this.menuIdx ? '▶ ' : '  '}${o}`, { fontSize: '22px', color: i === this.menuIdx ? '#ffffff' : '#9fb8a6' })));
+    } else {
+      objs.push(...teamCards(this, entries, this.menuIdx < n ? this.menuIdx : -1, 480, y0 + 56, 580, scr === 'move' ? this.menuSel : -1));
+      if (scr === 'team') objs.push(this.add.text(214, y0 + 56 + listH + 4, `${this.menuIdx === n ? '▶ ' : '  '}Atrás`, { fontSize: '22px', color: this.menuIdx === n ? '#ffffff' : '#9fb8a6' }));
+    }
+    objs.push(this.add.text(480, y0 + h - 22, hint, { fontSize: '15px', color: '#cfe8cf', align: 'center', wordWrap: { width: 600 } }).setOrigin(0.5));
     this.menuLayer.add(objs);
   }
 
   private onKey(e: KeyboardEvent) {
     if (this.busy) return;
     if (!this.menuOpen) {
-      if (e.key === 'Enter' && !this.moving) { this.menuOpen = true; this.menuIdx = 0; this.path = []; this.renderMenu(); }
+      if (e.key === 'Enter' && !this.moving) { this.menuOpen = true; this.openMenuScreen('main'); this.path = []; this.renderMenu(); }
       return;
     }
-    const n = this.menuItems().length;
+    const scr = this.menuScreen;
+    if (scr === 'data') {   // cualquier tecla de aceptar o volver cierra los datos
+      if (e.key === 'Enter' || e.key === 'Escape' || e.key === 'Backspace') { this.openMenuScreen('actions'); this.renderMenu(); }
+      return;
+    }
+    const n = scr === 'team' ? this.team.length + 1 : scr === 'move' ? this.team.length : this.menuItems().length;
+    const back = e.key === 'Escape' || e.key === 'Backspace';
     if (e.key === 'ArrowDown') this.menuIdx = (this.menuIdx + 1) % n;
     else if (e.key === 'ArrowUp') this.menuIdx = (this.menuIdx + n - 1) % n;
-    else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && (this.menuIdx === 1 || this.menuIdx === 2)) {
-      const which = this.menuIdx === 1 ? 'music' : 'sfx';
+    else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && scr === 'options' && this.menuIdx <= 1) {
+      const which = this.menuIdx === 0 ? 'music' : 'sfx';
       const v = Phaser.Math.Clamp(settings[which] + (e.key === 'ArrowRight' ? 1 : -1), 0, 10);
       if (v !== settings[which]) {
         settings[which] = v;
@@ -389,11 +576,40 @@ export class WorldScene extends Phaser.Scene {
         music.applyVolumes();
         if (which === 'sfx') sfx.rustle();             // muestra del nuevo volumen
       }
-    } else if (e.key === 'Escape') this.menuOpen = false;
-    else if (e.key === 'Enter') {
-      if (this.menuIdx === 0) this.menuOpen = false;
-      else if (this.menuIdx === 3) { settings.controls = settings.controls === 'keys' ? 'mouse' : 'keys'; saveSettings(); this.path = []; this.refreshHint(); }
-      else if (this.menuIdx === 4) { this.scene.start('Select'); return; }
+    } else if (back) {
+      if (scr === 'main') this.menuOpen = false;
+      else if (scr === 'options') this.openMenuScreen('main', 2);
+      else if (scr === 'team') this.openMenuScreen('main', 1);
+      else if (scr === 'actions') this.openMenuScreen('team', this.menuSel);
+      else if (scr === 'move') this.openMenuScreen('actions', 1);
+    } else if (e.key === 'Enter') {
+      if (scr === 'main') {
+        if (this.menuIdx === 0) this.menuOpen = false;
+        else if (this.menuIdx === 1) this.openMenuScreen('team');
+        else if (this.menuIdx === 2) this.openMenuScreen('options');
+        else { this.scene.start('Select'); return; }
+      } else if (scr === 'options') {
+        if (this.menuIdx === 2) { settings.controls = settings.controls === 'keys' ? 'mouse' : 'keys'; saveSettings(); this.path = []; this.refreshHint(); }
+        else if (this.menuIdx === 3) this.openMenuScreen('main', 2);
+      } else if (scr === 'team') {
+        if (this.menuIdx >= this.team.length) this.openMenuScreen('main', 1);
+        else { this.menuSel = this.menuIdx; this.openMenuScreen('actions'); }
+      } else if (scr === 'actions') {
+        if (this.menuIdx === 0) this.openMenuScreen('data');
+        else if (this.menuIdx === 1) {
+          if (this.team.length < 2) this.menuMsg = 'No hay otro Pokémon con quien intercambiar.';
+          else this.openMenuScreen('move', this.menuSel === 0 ? 1 : 0);
+        } else if (this.menuIdx === 2) {
+          const id = this.team[this.menuSel], was = this.isOut(id);
+          this.toggleOut(id);
+          this.menuMsg = was ? `${POKEMON[id].name} volvió a su bola.` : `${POKEMON[id].name} salió a caminar contigo.`;
+        } else this.openMenuScreen('team', this.menuSel);
+      } else if (scr === 'move') {
+        const from = this.menuSel, to = this.menuIdx;
+        if (to !== from) [this.team[from], this.team[to]] = [this.team[to], this.team[from]];   // el que quede primero abre las batallas
+        this.openMenuScreen('team', to);
+        this.menuMsg = to !== from ? `${POKEMON[this.team[to]].name} pasó al puesto ${to + 1}.` : '';
+      }
     } else return;
     this.renderMenu();
   }

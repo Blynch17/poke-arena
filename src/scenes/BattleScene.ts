@@ -10,6 +10,7 @@ import { Area, buildArea } from '../area';
 import { music } from '../music';
 import { sfx } from '../sfx';
 import { settings, saveSettings } from '../settings';
+import { Entry, teamCards, dataPanel, CARD_H, CARD_GAP } from '../teamui';
 
 const A = { x: 20, y: 84, w: 920, h: 480 }; // arena
 const R = 30; // radio de colisión de los Pokémon
@@ -102,7 +103,7 @@ interface Shot {
 // Ataque de área en curso (ver area.ts).
 interface ActiveArea { a: Area; owner: Side; att: Member; move: Move }
 
-type MenuScreen = '' | 'main' | 'team' | 'items' | 'balls' | 'settings' | 'controls';
+type MenuScreen = '' | 'main' | 'team' | 'teamActions' | 'data' | 'items' | 'balls' | 'settings' | 'controls';
 
 const MAIN_LABEL: Record<string, string> = {
   resume: 'Continuar', team: 'Pokémon', items: 'Objetos', balls: 'Poké Balls', settings: 'Configuración', exit: 'Salir al menú de equipos',
@@ -138,7 +139,7 @@ export class BattleScene extends Phaser.Scene {
   private enemySwapAt = 0;
 
   private menuLayer!: Phaser.GameObjects.Container;
-  private menu = { screen: '' as MenuScreen, idx: 0, forced: false, msg: '' };
+  private menu = { screen: '' as MenuScreen, idx: 0, forced: false, msg: '', sel: 0 };
 
   private ai = {
     nextFire: 1500, strafe: 1, strafeUntil: 0, aimErr: 0, aimUntil: 0,
@@ -166,7 +167,7 @@ export class BattleScene extends Phaser.Scene {
     this.thrown = [];
     this.catching = false;
     this.enemySwapAt = 0;
-    this.menu = { screen: '', idx: 0, forced: false, msg: '' };
+    this.menu = { screen: '', idx: 0, forced: false, msg: '', sel: 0 };
     this.ai.nextFire = 1500;
     this.ai.strafeUntil = 0;   // los temporizadores de la IA usan this.t, que vuelve a 0: si no, quedan los del combate anterior
     this.ai.aimUntil = 0;
@@ -1335,9 +1336,11 @@ export class BattleScene extends Phaser.Scene {
       this.adjustVolume(m.idx === 0 ? 'sfx' : 'music', e.key === 'ArrowRight' ? 1 : -1);
     } else if (e.key === 'Enter') { this.activate(m.idx); return; }
     else if (e.key === 'Escape' || e.key === 'Backspace') {
-      if (m.forced) return;
+      if (m.forced && m.screen !== 'data' && m.screen !== 'teamActions') return;
       if (m.screen === 'main') { this.closeMenu(); return; }
-      if (m.screen === 'controls') { m.screen = 'settings'; m.idx = 2; m.msg = ''; }
+      if (m.screen === 'data') { m.screen = 'teamActions'; m.idx = 0; m.msg = ''; }
+      else if (m.screen === 'teamActions') { m.screen = 'team'; m.idx = m.sel; m.msg = this.menu.forced ? 'Elige tu siguiente Pokémon' : ''; }
+      else if (m.screen === 'controls') { m.screen = 'settings'; m.idx = 2; m.msg = ''; }
       else if (m.screen === 'settings') { m.screen = 'main'; m.idx = this.mainActions().indexOf('settings'); m.msg = ''; }
       else { m.screen = 'main'; m.idx = 0; m.msg = ''; }
     } else return;
@@ -1385,12 +1388,11 @@ export class BattleScene extends Phaser.Scene {
       ];
     }
     if (m.screen === 'team') {
-      const list = this.player.team.map((mem, i) => {
-        const tag = mem.hp <= 0 ? '  (debilitado)' : i === this.player.active && !this.player.down ? '  (en combate)' : '';
-        return `${mem.def.name}   PS ${Math.ceil(mem.hp)}/${mem.maxHp}${tag}`;
-      });
+      const list = this.player.team.map((mem) => mem.def.name);
       return m.forced ? list : [...list, 'Atrás'];
     }
+    if (m.screen === 'teamActions') return ['Datos', 'Cambiar Pokémon', 'Atrás'];
+    if (m.screen === 'data') return ['Atrás'];
     if (m.screen === 'items') {
       return [
         ...(['potion', 'ether'] as ItemId[]).map((k) => `${ITEMS[k].name} x${this.inventory[k]}   ${ITEMS[k].desc}`),
@@ -1402,7 +1404,7 @@ export class BattleScene extends Phaser.Scene {
 
   private openMenu(screen: MenuScreen, forced = false) {
     this.paused = true;
-    this.menu = { screen, idx: 0, forced, msg: forced ? 'Elige tu siguiente Pokémon' : '' };
+    this.menu = { screen, idx: 0, forced, msg: forced ? 'Elige tu siguiente Pokémon' : '', sel: 0 };
     this.renderMenu();
   }
 
@@ -1416,6 +1418,7 @@ export class BattleScene extends Phaser.Scene {
     const m = this.menu;
     this.menuLayer.removeAll(true);
     if (!this.paused || !m.screen) return; // sin menú abierto no hay nada que dibujar
+    if (m.screen === 'team' || m.screen === 'teamActions' || m.screen === 'data') { this.renderTeamMenu(); return; }
     const opts = this.menuOptions();
     const h = 120 + opts.length * 40 + (m.screen === 'controls' ? 30 : 0);
     const y0 = 320 - h / 2;
@@ -1441,6 +1444,44 @@ export class BattleScene extends Phaser.Scene {
       fontSize: '15px', color: '#cfe8cf', align: 'center', wordWrap: { width: 540 },
     }).setOrigin(0.5));
     this.menuLayer.add(items);
+  }
+
+
+  // Los Pokémon del jugador con su vida y los PP que les quedan (para las tarjetas y el panel de datos).
+  private teamEntries(): Entry[] {
+    const p = this.player;
+    return p.team.map((mem, i) => ({
+      def: mem.def, level: mem.level, hp: mem.hp, maxHp: mem.maxHp, stats: mem.stats, pp: mem.pp,
+      tag: i === p.active && !p.down ? 'en combate' : undefined,
+    }));
+  }
+
+  // Pantalla Pokémon: tarjetas con imagen, nivel y PS; al elegir uno se ofrece ver sus datos o cambiarlo.
+  private renderTeamMenu() {
+    const m = this.menu, entries = this.teamEntries(), n = entries.length;
+    const objs: Phaser.GameObjects.GameObject[] = [this.add.rectangle(480, 320, 960, 640, 0x000000, 0.6)];
+    if (m.screen === 'data') {
+      objs.push(...dataPanel(this, entries[m.sel], 480, 320));
+      this.menuLayer.add(objs);
+      return;
+    }
+    const hint = m.msg || (m.screen === 'team' ? '↑ ↓ elegir · ENTER abrir opciones · ESC volver' : '↑ ↓ mover · ENTER aceptar · ESC volver');
+    const options = this.menuOptions();
+    const rows = m.screen === 'team' ? n : 1;
+    const listH = rows * (CARD_H + CARD_GAP);
+    const extra = m.screen === 'team' ? (m.forced ? 0 : 46) : options.length * 40 + 8;
+    const h = 100 + listH + extra + 36, y0 = 320 - h / 2;
+    objs.push(this.add.rectangle(480, 320, 640, h, 0x1b2a1e).setStrokeStyle(4, 0xffd23f));
+    objs.push(this.add.text(480, y0 + 26, 'POKÉMON', { fontSize: '26px', color: '#ffd23f', fontStyle: 'bold' }).setOrigin(0.5));
+    if (m.screen === 'team') {
+      objs.push(...teamCards(this, entries, m.idx < n ? m.idx : -1, 480, y0 + 56, 580));
+      if (!m.forced) objs.push(this.add.text(214, y0 + 56 + listH + 4, `${m.idx === n ? '▶ ' : '  '}Atrás`, { fontSize: '22px', color: m.idx === n ? '#ffffff' : '#9fb8a6' }));
+    } else {
+      objs.push(...teamCards(this, [entries[m.sel]], -1, 480, y0 + 56, 580));
+      options.forEach((o, i) => objs.push(this.add.text(214, y0 + 56 + listH + 4 + i * 40, `${i === m.idx ? '▶ ' : '  '}${o}`, { fontSize: '22px', color: i === m.idx ? '#ffffff' : '#9fb8a6' })));
+    }
+    objs.push(this.add.text(480, y0 + h - 22, hint, { fontSize: '15px', color: '#cfe8cf', align: 'center', wordWrap: { width: 600 } }).setOrigin(0.5));
+    this.menuLayer.add(objs);
   }
 
   // Explicación de cada esquema de controles, según la opción resaltada.
@@ -1495,9 +1536,17 @@ export class BattleScene extends Phaser.Scene {
       }
     } else if (m.screen === 'team') {
       if (i >= p.team.length) { m.screen = 'main'; m.idx = 0; m.msg = ''; } // el cursor queda en Continuar
-      else if (p.team[i].hp <= 0) m.msg = 'Ese Pokémon está debilitado.';
-      else if (i === p.active && !p.down) m.msg = 'Ya está en combate.';
+      else { m.sel = i; m.screen = 'teamActions'; m.idx = 0; m.msg = ''; }   // elegir un Pokémon abre sus opciones
+    } else if (m.screen === 'data') {
+      m.screen = 'teamActions'; m.idx = 0; m.msg = '';
+    } else if (m.screen === 'teamActions') {
+      const k = m.sel;
+      if (i === 0) { m.screen = 'data'; m.msg = ''; }
+      else if (i === 2) { m.screen = 'team'; m.idx = k; m.msg = m.forced ? 'Elige tu siguiente Pokémon' : ''; }
+      else if (p.team[k].hp <= 0) m.msg = 'Ese Pokémon está debilitado.';
+      else if (k === p.active && !p.down) m.msg = 'Ya está en combate.';
       else {
+        const i = k;
         const wasDown = p.down;
         this.switchTo(p, i);
         if (wasDown) {
