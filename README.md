@@ -68,6 +68,15 @@ con hierba alta, como en los juegos de la serie. Se controla un entrenador huaso
 - Qué aparece y a qué nivel está en `ROUTE_ENCOUNTERS` (`src/route.ts`); el mapa se genera en `buildRoute()` con una
   semilla fija. Por ahora la vida y los niveles se reinician en cada batalla.
 
+### Segunda ruta: Desierto de Atacama
+Al fondo de la Ruta Los Aromos (el camino sigue hasta el borde norte del mapa) se entra al **Desierto de Atacama**; al
+fondo sur del desierto se vuelve. Es la misma idea que las conexiones entre rutas de los juegos: al salir por el borde
+del mapa se oscurece la pantalla y se aparece en la entrada de la ruta vecina, con los Pokémon que tengas fuera
+siguiéndote. El desierto tiene camino de tierra, cardones, dunas, formaciones de roca roja (Valle de la Luna), un salar
+con laguna y **matorral seco** donde aparecen Pokémon salvajes de tierra, roca y fuego (Sandshrew, Diglett, Geodude,
+Cubone, Rhyhorn, Ponyta... y, muy rara vez, Arcanine y Aerodactyl), de nivel 13 a 28. Las rutas se definen en `ROUTES`
+(`src/route.ts`): cada una tiene su mapa, su tabla de encuentros y sus salidas (`exits`).
+
 ## Desarrollo
 
 ```bash

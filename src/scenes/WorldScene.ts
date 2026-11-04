@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { POKEMON, maxUses } from '../data';
 import { Entry, teamCards, dataPanel, CARD_H, CARD_GAP } from '../teamui';
-import { buildRoute, TILE, MAP_W, MAP_H, ROUTE_NAME, isWalkable, pickEncounter, RouteMap, RIVAL } from '../route';
+import { ROUTES, RouteDef, Exit, TILE, TileKey, isWalkable, isEncounterTile, pickEncounter, RouteMap, RIVAL } from '../route';
 import { music } from '../music';
 import { sfx } from '../sfx';
 import { settings, saveSettings } from '../settings';
@@ -14,7 +14,7 @@ const TURN_MS = 110;        // girar en el lugar antes de avanzar, como en los j
 const ENCOUNTER_RATE = 0.14; // probabilidad de encuentro por paso en hierba alta
 const SAFE_STEPS = 3;       // pasos sin encuentros al volver de una batalla
 
-export interface WorldData { team?: number[]; tx?: number; ty?: number; dir?: Dir; result?: 'win' | 'lose'; out?: number[] }
+export interface WorldData { team?: number[]; tx?: number; ty?: number; dir?: Dir; result?: 'win' | 'lose'; out?: number[]; route?: string; warp?: boolean }
 
 // Un Pokémon que anda por la ruta junto al entrenador: camina por casillas, sigue al jugador si este se aleja y
 // deambula solo cuando está cerca.
@@ -70,6 +70,8 @@ export class WorldScene extends Phaser.Scene {
   private encounterRate = ENCOUNTER_RATE;
   private hint!: Phaser.GameObjects.Text;
   private rival!: Phaser.GameObjects.Image;
+  private route!: RouteDef;
+  private routeId = 'aromos';
   private challenged = false;   // el rival ya vio al jugador y la batalla está por empezar
 
   constructor() {
@@ -78,7 +80,10 @@ export class WorldScene extends Phaser.Scene {
 
   create(data: WorldData) {
     this.team = data.team ?? [0, 1, 2];
-    this.map = buildRoute();
+    this.routeId = data.route && ROUTES[data.route] ? data.route : 'aromos';
+    this.route = ROUTES[this.routeId];
+    this.map = this.route.build();
+    if (data.warp) this.cameras.main.fadeIn(300, 0, 0, 0);   // llegada desde otra ruta
     const back = data.tx !== undefined && data.ty !== undefined;
     // Al perder contra el rival se vuelve a la entrada de la ruta.
     const lost = back && data.result === 'lose';
@@ -113,20 +118,22 @@ export class WorldScene extends Phaser.Scene {
 
     const px = (this.tx + 0.5) * TILE, py = (this.ty + 1) * TILE;
     this.player = this.add.image(px, py, 'trainer-walk', ROW[this.dir] * 3).setOrigin(0.5, 1).setScale(2).setDepth(py + 1);
-    this.rival = this.add.image((RIVAL.x + 0.5) * TILE, (RIVAL.y + 1) * TILE, 'trainer-rival', ROW[RIVAL.dir] * 3)
-      .setOrigin(0.5, 1).setScale(2).setDepth((RIVAL.y + 1) * TILE + 1);
+    if (this.hasRival()) {
+      this.rival = this.add.image((RIVAL.x + 0.5) * TILE, (RIVAL.y + 1) * TILE, 'trainer-rival', ROW[RIVAL.dir] * 3)
+        .setOrigin(0.5, 1).setScale(2).setDepth((RIVAL.y + 1) * TILE + 1);
+    }
     this.grassOver = this.add.image(0, 0, 'tile-tall-over').setOrigin(0, 0).setScale(2).setVisible(false);
     this.pathMark = this.add.graphics().setDepth(5);
     this.updateGrassOver(this.tx, this.ty);
     this.outIds.forEach((id) => this.spawnFollower(id, false));   // los que estaban fuera siguen fuera al volver de una batalla
 
     const cam = this.cameras.main;
-    cam.setBounds(0, 0, MAP_W * TILE, MAP_H * TILE);
+    cam.setBounds(0, 0, this.map.w * TILE, this.map.h * TILE);
     cam.startFollow(this.player, true, 0.18, 0.18);
     cam.roundPixels = true;
 
     // Cartel con el nombre de la ruta y ayuda de controles.
-    const banner = this.add.text(480, 56, ROUTE_NAME, {
+    const banner = this.add.text(480, 56, this.route.name, {
       fontSize: '30px', color: '#ffffff', stroke: '#1b2a1e', strokeThickness: 6, fontStyle: 'bold',
     }).setOrigin(0.5).setScrollFactor(0).setDepth(2e6);
     this.tweens.add({ targets: banner, alpha: 0, delay: 2400, duration: 700 });
@@ -145,22 +152,43 @@ export class WorldScene extends Phaser.Scene {
 
   // ---------- mapa ----------
 
+  private tileTexture(k: TileKey, x: number, y: number): string {
+    const v = (x * 7 + y * 13) % 3;
+    switch (k) {
+      case 'grass': return `tile-grass-${v}`;
+      case 'flower': return 'tile-flower';
+      case 'path': return 'tile-path';
+      case 'tall': return 'tile-tall';
+      case 'tree': return 'tile-tree';
+      case 'water': return 'tile-water-0';
+      case 'fence': return 'tile-fence';
+      case 'rock': return 'tile-rock';
+      case 'sand': return `tile-sand-${v}`;
+      case 'dune': return 'tile-dune';
+      case 'brush': return 'tile-brush';
+      case 'road': return 'tile-road';
+      case 'cliff': return 'tile-cliff';
+      case 'salt': return 'tile-salt';
+      case 'cactus': return 'tile-cactus';
+      default: return 'tile-rock-d';
+    }
+  }
+
   private drawMap() {
     const { tiles, w, h } = this.map;
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const k = tiles[y][x];
-      const tex = k === 'grass' ? `tile-grass-${(x * 7 + y * 13) % 3}`
-        : k === 'flower' ? 'tile-flower' : k === 'path' ? 'tile-path' : k === 'tall' ? 'tile-tall'
-        : k === 'tree' ? 'tile-tree' : k === 'water' ? 'tile-water-0' : k === 'fence' ? 'tile-fence' : 'tile-rock';
-      const img = this.add.image(x * TILE, y * TILE, tex).setOrigin(0, 0).setScale(2);
-      // árboles, cercos y rocas se ordenan por su base para que el entrenador pase por detrás o por delante
-      img.setDepth(k === 'tree' || k === 'fence' || k === 'rock' ? (y + 1) * TILE : 0);
+      const img = this.add.image(x * TILE, y * TILE, this.tileTexture(k, x, y)).setOrigin(0, 0).setScale(2);
+      // árboles, cercos, rocas y cactus se ordenan por su base para que el entrenador pase por detrás o por delante
+      img.setDepth(k === 'tree' || k === 'fence' || k === 'rock' || k === 'cactus' || k === 'rockd' ? (y + 1) * TILE : 0);
       if (k === 'water') this.water.push(img);
     }
   }
 
+  private hasRival() { return this.route.trainer; }
+
   private walkable(x: number, y: number) {
-    return x >= 0 && y >= 0 && x < this.map.w && y < this.map.h && isWalkable(this.map.tiles[y][x]) && !(x === RIVAL.x && y === RIVAL.y);
+    return x >= 0 && y >= 0 && x < this.map.w && y < this.map.h && isWalkable(this.map.tiles[y][x]) && !(this.hasRival() && x === RIVAL.x && y === RIVAL.y);
   }
 
   private refreshHint() {
@@ -252,16 +280,18 @@ export class WorldScene extends Phaser.Scene {
 
   // La hierba alta cubre los pies del entrenador mientras está dentro de ella.
   private updateGrassOver(tx: number, ty: number) {
-    const inTall = this.map.tiles[ty]?.[tx] === 'tall';
+    const t = this.map.tiles[ty]?.[tx], inTall = t !== undefined && isEncounterTile(t);
     this.grassOver.setVisible(inTall);
-    if (inTall) this.grassOver.setPosition(tx * TILE, ty * TILE).setDepth(this.player.depth + 1);
+    if (inTall) this.grassOver.setTexture(t === 'brush' ? 'tile-brush-over' : 'tile-tall-over').setPosition(tx * TILE, ty * TILE).setDepth(this.player.depth + 1);
   }
 
   private onArrive() {
     const safe = this.safeSteps > 0;          // este paso aún cuenta como "seguro" (sin encuentros)
     if (safe) this.safeSteps--;
+    const ex = this.map.exits.find((e) => e.x === this.tx && e.y === this.ty);
+    if (ex) { this.warp(ex); return; }
     if (this.checkRival()) return;
-    if (this.map.tiles[this.ty][this.tx] !== 'tall') return;
+    if (!isEncounterTile(this.map.tiles[this.ty][this.tx])) return;
     sfx.rustle();
     if (!safe && Math.random() < this.encounterRate) this.startEncounter();
   }
@@ -284,13 +314,24 @@ export class WorldScene extends Phaser.Scene {
 
   /** Elige qué Pokémon salvaje aparece según la tabla de la ruta y abre la batalla. */
   private launchBattle() {
-    const e = pickEncounter(Math.random());
+    const e = pickEncounter(Math.random(), Math.random, this.route.encounters);
     this.scene.start('Battle', {
       team: this.team, wild: true, wildId: e.id, wildLevel: e.level,
-      returnTo: { team: this.team, tx: this.tx, ty: this.ty, dir: this.dir, out: this.outIds },
+      returnTo: { team: this.team, tx: this.tx, ty: this.ty, dir: this.dir, out: this.outIds, route: this.routeId },
     });
   }
 
+
+  // ---------- paso entre rutas ----------
+
+  /** Salida del mapa hacia otra ruta: se oscurece la pantalla y se aparece en la entrada de la ruta vecina (como las conexiones de los juegos). */
+  private warp(ex: Exit) {
+    this.busy = true;
+    this.path = [];
+    this.setFrame(0);
+    this.cameras.main.fadeOut(280, 0, 0, 0);
+    this.time.delayedCall(300, () => this.scene.start('World', { team: this.team, route: ex.to, tx: ex.tx, ty: ex.ty, dir: ex.dir, out: this.outIds, warp: true }));
+  }
 
   // ---------- Pokémon fuera de su bola ----------
 
@@ -407,7 +448,7 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private checkRival(): boolean {
-    if (rivalBeaten || this.challenged || !this.rivalSees()) return false;
+    if (!this.hasRival() || rivalBeaten || this.challenged || !this.rivalSees()) return false;
     this.challenged = true;
     this.busy = true;
     this.path = [];
@@ -441,7 +482,7 @@ export class WorldScene extends Phaser.Scene {
     this.time.delayedCall(1700, () => { box.destroy(); txt.destroy(); this.cameras.main.flash(160, 255, 255, 255); });
     this.time.delayedCall(2100, () => this.scene.start('Battle', {
       team: this.team, trainer: RIVAL.name,
-      returnTo: { team: this.team, tx: this.tx, ty: this.ty, dir: this.dir, out: this.outIds },
+      returnTo: { team: this.team, tx: this.tx, ty: this.ty, dir: this.dir, out: this.outIds, route: this.routeId },
     }));
   }
 
