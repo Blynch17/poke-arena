@@ -1088,14 +1088,14 @@ export class BattleScene extends Phaser.Scene {
     // Red de seguridad: si lleva ~1 s casi sin moverse (y no está concentrándose), va hacia el centro.
     if (this.t >= ai.checkAt) {
       const moved = Math.hypot(e.sprite.x - ai.lastX, e.sprite.y - ai.lastY);
-      if (moved < 45 && !locked && this.t > 1500) ai.unstickUntil = this.t + 900;
+      if (moved < 45 && !locked && this.t > 1500 && Math.hypot(cx - e.sprite.x, cy - e.sprite.y) > 70) ai.unstickUntil = this.t + 900;   // en el centro no hay a dónde ir: se quedaría vibrando
       ai.lastX = e.sprite.x; ai.lastY = e.sprite.y;
       ai.checkAt = this.t + 1000;
     }
     if (this.t < ai.unstickUntil) {
       const L = Math.hypot(cx - e.sprite.x, cy - e.sprite.y) || 1;
-      mx = ((cx - e.sprite.x) / L) * 1.5;
-      my = ((cy - e.sprite.y) / L) * 1.5;
+      if (L < 50) ai.unstickUntil = 0;   // ya llegó al centro: seguir empujando hacia él lo haría vibrar en el lugar
+      else { mx = ((cx - e.sprite.x) / L) * 1.5; my = ((cy - e.sprite.y) / L) * 1.5; }
     }
 
     const len = Math.hypot(mx, my);
