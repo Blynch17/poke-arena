@@ -1,6 +1,6 @@
 import Phaser from 'phaser';
-import { POKEMON, maxUses } from '../data';
-import { Entry, teamCards, dataPanel, CARD_H, CARD_GAP } from '../teamui';
+import { POKEMON, Party, maxUses } from '../data';
+import { Entry, teamCards, dataPanel, cardMetrics } from '../teamui';
 import { ROUTES, RouteDef, Exit, TILE, TileKey, isWalkable, isEncounterTile, pickEncounter, RouteMap, RIVAL } from '../route';
 import { music } from '../music';
 import { sfx } from '../sfx';
@@ -14,7 +14,7 @@ const TURN_MS = 110;        // girar en el lugar antes de avanzar, como en los j
 const ENCOUNTER_RATE = 0.14; // probabilidad de encuentro por paso en hierba alta
 const SAFE_STEPS = 3;       // pasos sin encuentros al volver de una batalla
 
-export interface WorldData { team?: number[]; tx?: number; ty?: number; dir?: Dir; result?: 'win' | 'lose'; out?: number[]; route?: string; warp?: boolean }
+export interface WorldData { team?: number[]; tx?: number; ty?: number; dir?: Dir; result?: 'win' | 'lose'; out?: number[]; route?: string; warp?: boolean; party?: Party; items?: { potion: number; ether: number } }
 
 // Un Pokémon que anda por la ruta junto al entrenador: camina por casillas, sigue al jugador si este se aleja y
 // deambula solo cuando está cerca.
@@ -63,6 +63,8 @@ export class WorldScene extends Phaser.Scene {
   private menuMsg = '';
   private followers: Follower[] = [];
   private outIds: number[] = [];   // Pokémon que están fuera, por índice en POKEMON
+  private party: Party = {};       // PS y PP de cada Pokémon del equipo; no se recuperan solos
+  private items = { potion: 3, ether: 3 };
   private stillMs = 0;             // hace cuánto no camina el jugador
   private menuLayer!: Phaser.GameObjects.Container;
   private busy = false;          // transición hacia la batalla
@@ -99,6 +101,9 @@ export class WorldScene extends Phaser.Scene {
     this.menuScreen = 'main';
     this.menuSel = 0;
     this.menuMsg = '';
+    // Al perder se vuelve a la entrada y el equipo se cura (como volver al Centro Pokémon); si no, se conserva lo que quedó.
+    this.party = back && !lost ? { ...(data.party ?? {}) } : {};
+    this.items = back && data.items ? { ...data.items } : { potion: 3, ether: 3 };
     this.followers = [];
     this.stillMs = 0;
     this.outIds = back ? [...(data.out ?? [])] : [];
@@ -316,7 +321,7 @@ export class WorldScene extends Phaser.Scene {
   private launchBattle() {
     const e = pickEncounter(Math.random(), Math.random, this.route.encounters);
     this.scene.start('Battle', {
-      team: this.team, wild: true, wildId: e.id, wildLevel: e.level,
+      team: this.team, wild: true, wildId: e.id, wildLevel: e.level, party: this.party, items: this.items,
       returnTo: { team: this.team, tx: this.tx, ty: this.ty, dir: this.dir, out: this.outIds, route: this.routeId },
     });
   }
@@ -330,7 +335,7 @@ export class WorldScene extends Phaser.Scene {
     this.path = [];
     this.setFrame(0);
     this.cameras.main.fadeOut(280, 0, 0, 0);
-    this.time.delayedCall(300, () => this.scene.start('World', { team: this.team, route: ex.to, tx: ex.tx, ty: ex.ty, dir: ex.dir, out: this.outIds, warp: true }));
+    this.time.delayedCall(300, () => this.scene.start('World', { team: this.team, party: this.party, items: this.items, route: ex.to, tx: ex.tx, ty: ex.ty, dir: ex.dir, out: this.outIds, warp: true }));
   }
 
   // ---------- Pokémon fuera de su bola ----------
@@ -481,7 +486,7 @@ export class WorldScene extends Phaser.Scene {
       .setOrigin(0.5).setScrollFactor(0).setDepth(2e6);
     this.time.delayedCall(1700, () => { box.destroy(); txt.destroy(); this.cameras.main.flash(160, 255, 255, 255); });
     this.time.delayedCall(2100, () => this.scene.start('Battle', {
-      team: this.team, trainer: RIVAL.name,
+      team: this.team, trainer: RIVAL.name, party: this.party, items: this.items,
       returnTo: { team: this.team, tx: this.tx, ty: this.ty, dir: this.dir, out: this.outIds, route: this.routeId },
     }));
   }
@@ -534,7 +539,9 @@ export class WorldScene extends Phaser.Scene {
   private teamEntries(): Entry[] {
     return this.team.map((i, k) => {
       const def = POKEMON[i];
-      return { def, level: def.level, hp: def.maxHp, maxHp: def.maxHp, stats: def.stats, pp: def.moves.map(maxUses), tag: [k === 0 ? 'abre las batallas' : '', this.isOut(i) ? 'fuera' : ''].filter(Boolean).join(' · ') || undefined };
+      const saved = this.party[i];
+      const pp = saved && saved.pp.length === def.moves.length ? saved.pp : def.moves.map(maxUses);
+      return { def, level: def.level, hp: saved ? Math.min(def.maxHp, saved.hp) : def.maxHp, maxHp: def.maxHp, stats: def.stats, pp, tag: [k === 0 ? 'abre las batallas' : '', this.isOut(i) ? 'fuera' : ''].filter(Boolean).join(' · ') || undefined };
     });
   }
 
@@ -576,7 +583,7 @@ export class WorldScene extends Phaser.Scene {
       return;
     }
     const options = this.menuItems();
-    const rows = scr === 'actions' ? 1 : n, listH = rows * (CARD_H + CARD_GAP);
+    const rows = scr === 'actions' ? 1 : n, cm = cardMetrics(rows), listH = rows * (cm.h + cm.gap);
     const extra = scr === 'team' ? 46 : scr === 'actions' ? options.length * 40 + 8 : 0;
     const h = 100 + listH + extra + 36, y0 = 320 - h / 2;
     const hint = this.menuMsg || (scr === 'move' ? 'Elige con quién intercambiar su lugar · ENTER confirmar · ESC cancelar' : scr === 'team' ? '↑ ↓ elegir · ENTER abrir opciones · el primero abre las batallas · ESC volver' : '↑ ↓ mover · ENTER aceptar · ESC volver');
@@ -642,6 +649,7 @@ export class WorldScene extends Phaser.Scene {
           else this.openMenuScreen('move', this.menuSel === 0 ? 1 : 0);
         } else if (this.menuIdx === 2) {
           const id = this.team[this.menuSel], was = this.isOut(id);
+          if (!was && this.party[id] && this.party[id].hp <= 0) { this.menuMsg = `${POKEMON[id].name} está debilitado.`; this.renderMenu(); return; }
           this.toggleOut(id);
           this.menuMsg = was ? `${POKEMON[id].name} volvió a su bola.` : `${POKEMON[id].name} salió a caminar contigo.`;
         } else this.openMenuScreen('team', this.menuSel);

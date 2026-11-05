@@ -18,27 +18,40 @@ type Obj = Phaser.GameObjects.GameObject;
 
 const hpColor = (f: number) => (f > 0.5 ? 0x4fd14f : f > 0.2 ? 0xffd23f : 0xe84a4a);
 
-/** Altura de cada tarjeta y separación, para que quien llama sepa cuánto espacio ocupan. */
-export const CARD_H = 84;
-export const CARD_GAP = 10;
+/** Tamaño de las tarjetas según cuántos Pokémon hay: con 4 o más se compactan para que quepan hasta 6 en pantalla. */
+export function cardMetrics(n: number) { return n <= 3 ? { h: 84, gap: 10, compact: false } : { h: 60, gap: 6, compact: true }; }
 
 /** Una tarjeta por Pokémon: imagen, nombre, nivel, barra y número de PS. `mark` resalta otra tarjeta (la que se está moviendo). */
 export function teamCards(
   scene: Phaser.Scene, entries: Entry[], sel: number, cx: number, top: number, w = 560, mark = -1,
 ): Obj[] {
   const out: Obj[] = [];
+  const { h: CARD_H, gap: CARD_GAP, compact } = cardMetrics(entries.length);
   entries.forEach((e, i) => {
     const y = top + i * (CARD_H + CARD_GAP) + CARD_H / 2, left = cx - w / 2;
     const faint = e.hp <= 0;
     const stroke = i === sel ? 0xffd23f : i === mark ? 0x7fc4ff : 0x3f5c48;
-    out.push(scene.add.rectangle(cx, y, w, CARD_H, faint ? 0x2a2a2a : 0x24382a).setStrokeStyle(4, stroke));
+    out.push(scene.add.rectangle(cx, y, w, CARD_H, faint ? 0x2a2a2a : 0x24382a).setStrokeStyle(compact ? 3 : 4, stroke));
+    const f = Phaser.Math.Clamp(e.hp / e.maxHp, 0, 1);
+    if (compact) {   // una sola fila de dos líneas: nombre y nivel arriba, barra y PS abajo
+      out.push(scene.add.text(left + 10, y - 22, `${i + 1}`, { fontSize: '14px', color: '#ffd23f', fontStyle: 'bold' }));
+      if (scene.textures.exists(`${e.def.id}-front`)) out.push(scene.add.image(left + 46, y, `${e.def.id}-front`).setScale(0.5).setAlpha(faint ? 0.4 : 1));
+      out.push(scene.add.text(left + 88, y - 24, e.def.name, { fontSize: '17px', color: faint ? '#888' : '#fff', fontStyle: 'bold' }));
+      const note = faint ? 'debilitado' : e.tag ?? '';
+      out.push(scene.add.text(left + w - 12, y - 23, `${note ? note + ' · ' : ''}Nv.${e.level}`, { fontSize: '14px', color: faint ? '#ff8888' : '#cfe8cf' }).setOrigin(1, 0));
+      const bx = left + 88, bw = w - 88 - 130, by = y + 2;
+      out.push(scene.add.rectangle(bx + bw / 2, by + 6, bw + 4, 14, 0x000000, 0.65));
+      out.push(scene.add.rectangle(bx, by, Math.max(0.01, bw * f), 10, hpColor(f)).setOrigin(0, 0));
+      out.push(scene.add.text(left + w - 12, by - 2, `PS ${Math.ceil(e.hp)}/${e.maxHp}`, { fontSize: '14px', color: '#cfe8cf' }).setOrigin(1, 0));
+      return;
+    }
     out.push(scene.add.text(left + 14, y - 30, `${i + 1}`, { fontSize: '16px', color: '#ffd23f', fontStyle: 'bold' }));
     if (scene.textures.exists(`${e.def.id}-front`)) out.push(scene.add.image(left + 62, y, `${e.def.id}-front`).setScale(0.7).setAlpha(faint ? 0.4 : 1));
     out.push(scene.add.text(left + 122, y - 32, e.def.name, { fontSize: '20px', color: faint ? '#888' : '#fff', fontStyle: 'bold' }));
     out.push(scene.add.text(left + w - 14, y - 32, `Nv.${e.level}`, { fontSize: '18px', color: '#cfe8cf' }).setOrigin(1, 0));
-    const f = Phaser.Math.Clamp(e.hp / e.maxHp, 0, 1), bw = w - 136, bx = left + 122, by = y + 2;
+    const bw = w - 136, bx = left + 122, by = y + 2;
     out.push(scene.add.rectangle(bx + bw / 2, by + 6, bw + 4, 16, 0x000000, 0.65));
-    out.push(scene.add.rectangle(bx, by - 2, Math.max(0.01, bw * f), 12, hpColor(f)).setOrigin(0, 0).setPosition(bx, by));
+    out.push(scene.add.rectangle(bx, by, Math.max(0.01, bw * f), 12, hpColor(f)).setOrigin(0, 0));
     out.push(scene.add.text(bx, y + 22, `PS ${Math.ceil(e.hp)}/${e.maxHp}`, { fontSize: '14px', color: '#cfe8cf' }));
     if (e.tag || faint) out.push(scene.add.text(left + w - 14, y + 22, faint ? 'debilitado' : e.tag!, { fontSize: '14px', color: faint ? '#ff8888' : '#ffd23f' }).setOrigin(1, 0));
   });

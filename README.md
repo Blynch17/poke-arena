@@ -1,6 +1,6 @@
 # Poke Arena
 
-Juego 2D de arena en tiempo real con Pokémon: te mueves libremente, lanzas ataques sin turnos en la dirección en que miras y cada ataque gasta energía. Jugador vs IA, equipos de 3.
+Juego 2D de arena en tiempo real con Pokémon: te mueves libremente, lanzas ataques sin turnos en la dirección en que miras y cada ataque gasta energía. Jugador vs IA, equipos de 1 a 6 Pokémon.
 
 ## Controles
 
@@ -66,7 +66,10 @@ con hierba alta, como en los juegos de la serie. Se controla un entrenador huaso
   combate de equipos. No se puede huir ni capturar sus Pokémon; si pierdes vuelves a la entrada de la ruta, y si ganas
   ya no te reta de nuevo (hasta que salgas de la aventura). Su sprite sale de `tools/make_rival_sprite.py`.
 - Qué aparece y a qué nivel está en `ROUTE_ENCOUNTERS` (`src/route.ts`); el mapa se genera en `buildRoute()` con una
-  semilla fija. Por ahora la vida y los niveles se reinician en cada batalla.
+  semilla fija.
+- **Los PS y los PP se conservan entre batallas** (también los objetos gastados): nada se recupera solo, y en el menú
+  Pokémon ves cuánto le queda a cada uno. Si pierdes, vuelves a la entrada y el equipo se cura. Al salir de la aventura
+  al menú de equipos todo se reinicia.
 
 ### Segunda ruta: Desierto de Atacama
 Al fondo de la Ruta Los Aromos (el camino sigue hasta el borde norte del mapa) se entra al **Desierto de Atacama**; al

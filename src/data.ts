@@ -350,6 +350,10 @@ export const POKEMON: PokemonDef[] = [...RAW, ...EXTRA_RAW].map((r) => {
   };
 }).sort((a, b) => a.dex - b.dex);
 
+/** Lo que conserva un Pokémon de su equipo entre batallas en la aventura: sus PS y los usos que le quedan de cada ataque. */
+export interface PartyMon { hp: number; pp: number[] }
+export type Party = Record<number, PartyMon>;   // por índice en POKEMON
+
 // Las curaciones también se multiplican por HP_MULT (Poción original: 20 PS).
 export const ITEMS = {
   potion: { name: 'Poción', desc: `+${20 * HP_MULT} PS`, hp: 20 * HP_MULT, energy: 0 },

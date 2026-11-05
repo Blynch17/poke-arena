@@ -1,6 +1,6 @@
 import Phaser from 'phaser';
 import {
-  POKEMON, PokemonDef, Move, Stages, Stats, Fighter, StatKey, calcDamage, TYPE_COLOR, ITEMS, ItemId, ENERGY_MAX, ENERGY_REGEN,
+  POKEMON, PokemonDef, Party, Move, Stages, Stats, Fighter, StatKey, calcDamage, TYPE_COLOR, ITEMS, ItemId, ENERGY_MAX, ENERGY_REGEN,
   STRUGGLE, newStages, stageMult, maxUses, STAT_NAME, STAGE_MAX, SPEED_STAGE_EFFECT,
   BALLS, BallId, makeCombatant, WILD_LEVEL_MIN, WILD_LEVEL_MAX,
 } from '../data';
@@ -10,7 +10,7 @@ import { Area, buildArea } from '../area';
 import { music } from '../music';
 import { sfx } from '../sfx';
 import { settings, saveSettings } from '../settings';
-import { Entry, teamCards, dataPanel, CARD_H, CARD_GAP } from '../teamui';
+import { Entry, teamCards, dataPanel, cardMetrics } from '../teamui';
 
 const A = { x: 20, y: 84, w: 920, h: 480 }; // arena
 const R = 30; // radio de colisión de los Pokémon
@@ -124,6 +124,7 @@ export class BattleScene extends Phaser.Scene {
   private armed: BallId | null = null; // bola elegida en el menú, lista para lanzar con ESPACIO
   private thrown: Thrown[] = [];
   private catching = false; // secuencia de captura en curso: el combate se congela
+  private teamIds: number[] = [];   // índice en POKEMON de cada Pokémon del jugador
   private trainer: string | null = null; // combate contra un entrenador: no se puede huir ni capturar
   private returnTo: Record<string, unknown> | null = null; // si viene del mundo, a dónde volver al terminar
 
@@ -151,14 +152,15 @@ export class BattleScene extends Phaser.Scene {
     super('Battle');
   }
 
-  create(data: { team: number[]; wild?: boolean; wildId?: string; wildLevel?: number; trainer?: string; returnTo?: Record<string, unknown> }) {
+  create(data: { team: number[]; wild?: boolean; wildId?: string; wildLevel?: number; trainer?: string; returnTo?: Record<string, unknown>; party?: Party; items?: { potion: number; ether: number } }) {
     this.shots = [];
     this.areas = [];
     this.moveTexts = [];
     this.t = 0;
     this.paused = false;
     this.over = false;
-    this.inventory = { potion: 3, ether: 3 };
+    this.inventory = data.items ? { ...data.items } : { potion: 3, ether: 3 };   // en la aventura los objetos gastados no vuelven
+    this.teamIds = data.team;
     this.wild = !!data.wild;
     this.returnTo = data.returnTo ?? null;
     this.trainer = data.trainer ?? null;
@@ -197,13 +199,24 @@ export class BattleScene extends Phaser.Scene {
       const level = data.wildLevel ?? Phaser.Math.Between(WILD_LEVEL_MIN, WILD_LEVEL_MAX);
       this.enemy = this.makeSide(false, [def], A.x + A.w - 160, A.y + A.h / 2, [level]);
     } else {
-      const others = Phaser.Utils.Array.Shuffle([...POKEMON]).slice(0, 3);
+      const others = Phaser.Utils.Array.Shuffle([...POKEMON]).slice(0, Phaser.Math.Clamp(mine.length, 1, 6));   // el rival lleva tantos Pokémon como tú
       this.enemy = this.makeSide(false, others, A.x + A.w - 160, A.y + A.h / 2);
     }
 
     this.hud = this.add.graphics().setDepth(50);
     this.buildHudTexts();
     this.refreshMoveTexts();
+    // En la aventura cada Pokémon llega con los PS y PP que le quedaron; sale a pelear el primero que no esté debilitado.
+    if (data.party) {
+      this.player.team.forEach((mem, i) => {
+        const saved = data.party![data.team[i]];
+        if (!saved) return;
+        mem.hp = Math.min(mem.maxHp, saved.hp);
+        if (saved.pp.length === mem.pp.length) mem.pp = saved.pp.map((n, k) => Math.min(n, maxUses(mem.def.moves[k])));
+      });
+      const first = this.player.team.findIndex((m) => m.hp > 0);
+      if (first > 0) this.switchTo(this.player, first);
+    }
     this.menuLayer = this.add.container(0, 0).setDepth(100);
 
     this.keys = this.input.keyboard!.addKeys('W,A,S,D,Q,E,R,U,I,O,P,SPACE') as Record<string, Phaser.Input.Keyboard.Key>;
@@ -1349,8 +1362,19 @@ export class BattleScene extends Phaser.Scene {
 
   // Termina la batalla: vuelve al camino si venía del mundo, o a la selección de equipo.
   private leave() {
-    if (this.returnTo) this.scene.start('World', this.returnTo);
+    if (this.returnTo) this.scene.start('World', { ...this.returnTo, party: this.collectParty(), items: { ...this.inventory } });
     else this.scene.start('Select');
+  }
+
+  // PS y PP con los que sale cada Pokémon del jugador de la batalla (para la aventura).
+  private collectParty(): Party {
+    const out: Party = {};
+    this.player.team.forEach((mem, i) => {
+      const base = POKEMON[this.teamIds[i]];
+      const transformed = mem.def.id !== base.id;   // Ditto copió los ataques del rival: sus PP propios no cambian
+      out[this.teamIds[i]] = { hp: mem.hp, pp: transformed ? base.moves.map(maxUses) : [...mem.pp] };
+    });
+    return out;
   }
 
   // Acciones del menú principal; "Poké Balls" solo existe frente a un Pokémon salvaje.
@@ -1468,7 +1492,7 @@ export class BattleScene extends Phaser.Scene {
     const hint = m.msg || (m.screen === 'team' ? '↑ ↓ elegir · ENTER abrir opciones · ESC volver' : '↑ ↓ mover · ENTER aceptar · ESC volver');
     const options = this.menuOptions();
     const rows = m.screen === 'team' ? n : 1;
-    const listH = rows * (CARD_H + CARD_GAP);
+    const cm = cardMetrics(m.screen === 'team' ? n : 1), listH = rows * (cm.h + cm.gap);
     const extra = m.screen === 'team' ? (m.forced ? 0 : 46) : options.length * 40 + 8;
     const h = 100 + listH + extra + 36, y0 = 320 - h / 2;
     objs.push(this.add.rectangle(480, 320, 640, h, 0x1b2a1e).setStrokeStyle(4, 0xffd23f));

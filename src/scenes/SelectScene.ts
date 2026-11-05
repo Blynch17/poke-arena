@@ -4,7 +4,7 @@ import { music } from '../music';
 import { sfx } from '../sfx';
 import { settings } from '../settings';
 
-const TEAM_SIZE = 3;
+const MAX_TEAM = 6;   // se puede ir con entre 1 y 6 Pokémon
 const COLS = 4; // columnas de la cuadrícula; las filas se calculan según cuántos combatientes haya
 const ROW_H = 132;
 const TOP = 140;      // la cuadrícula se ve entre el encabezado (arriba) y la ayuda (abajo) y se desplaza con el cursor
@@ -44,7 +44,7 @@ export class SelectScene extends Phaser.Scene {
     fixed(this.add.rectangle(480, TOP / 2, 960, TOP, bg.color), 20);
     fixed(this.add.rectangle(480, (BOTTOM + 640) / 2, 960, 640 - BOTTOM, bg.color), 20);
     fixed(this.add.text(480, 50, 'POKE ARENA', { fontSize: '44px', color: '#ffd23f', fontStyle: 'bold' }).setOrigin(0.5));
-    fixed(this.add.text(480, 96, `Elige ${TEAM_SIZE} Pokémon (el primero es el que sale a pelear)`, { fontSize: '18px', color: '#cfe8cf' }).setOrigin(0.5));
+    fixed(this.add.text(480, 96, `Elige de 1 a ${MAX_TEAM} Pokémon (el primero es el que sale a pelear)`, { fontSize: '18px', color: '#cfe8cf' }).setOrigin(0.5));
 
     this.modeText = fixed(this.add.text(480, 124, '', { fontSize: '17px', color: '#ffd23f' }).setOrigin(0.5));
     POKEMON.forEach((p, i) => {
@@ -85,13 +85,14 @@ export class SelectScene extends Phaser.Scene {
     else if (e.key === 'ArrowUp') this.moveVertical(-1);
     else if (e.key === 'Tab') this.mode = this.mode === 'arena' ? 'wild' : this.mode === 'wild' ? 'adventure' : 'arena';
     else if (e.key === 'Backspace') this.picks.pop();
-    else if (e.key === 'Enter') {
-      if (this.picks.length === TEAM_SIZE) {
+    else if (e.key === ' ' || e.key === 'Enter') {
+      // ESPACIO comienza con los que haya elegido (de 1 a 6); ENTER suma, y con el equipo completo también comienza.
+      if ((e.key === ' ' && this.picks.length >= 1) || this.picks.length === MAX_TEAM) {
         if (this.mode === 'adventure') this.scene.start('World', { team: this.picks });
         else this.scene.start('Battle', { team: this.picks, wild: this.mode === 'wild' });
         return;
       }
-      if (!this.picks.includes(this.cursor)) this.picks.push(this.cursor);
+      if (e.key === 'Enter' && !this.picks.includes(this.cursor)) this.picks.push(this.cursor);
     }
     this.refresh();
   }
@@ -137,9 +138,10 @@ export class SelectScene extends Phaser.Scene {
         p.moves.map((m, i) => `${(settings.controls === 'keys' ? 'UIOP' : 'QWER')[i]}: ${m.name}`).join('   ')
     );
     if (this.info.text !== infoText) this.info.setText(infoText);
-    const hintText = this.picks.length === TEAM_SIZE
-      ? 'ENTER: ¡Comenzar!   (Retroceso: quitar el último)'
-      : 'Flechas: mover   ENTER: elegir   Retroceso: quitar';
+    const n = this.picks.length;
+    const hintText = n === MAX_TEAM ? 'ESPACIO o ENTER: ¡Comenzar con 6!   (Retroceso: quitar el último)'
+      : n >= 1 ? `ESPACIO: ¡Comenzar con ${n}!   ·   ENTER: sumar otro (hasta ${MAX_TEAM})   ·   Retroceso: quitar`
+      : 'Flechas: mover   ENTER: elegir (de 1 a 6)   Retroceso: quitar';
     if (this.hint.text !== hintText) this.hint.setText(hintText);
   }
 }
