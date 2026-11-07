@@ -114,3 +114,21 @@ un ataque con 70 % acierta ~68 % de las veces y uno con 50 %, ~57 %.
 Ataques con precisión menor a 100: Trueno y Ventisca 70, Roca Afilada 80, Hidrobomba 80, Megapatada 75, Puño Dinámico 50,
 Cola Férrea 75, Llamarada 85, Hipnosis 60, Canto 55, Supersónico 55, entre otros (la pantalla de datos de cada Pokémon muestra
 «Prec.» en cada ataque). La IA lo tiene en cuenta al elegir ataque.
+
+
+## Bajar stats, curar y Teletransporte
+
+Los ataques de estado que **bajan stats del rival** (`debuff` en `Move`) son proyectiles: hay que acertarlos y, si conectan,
+bajan etapas (de -6 a 6). La precisión es una etapa más (`acc`): x3/4 por etapa baja, x3/5 con dos... y los ataques que no
+aciertan se desvían según la precisión que quede (ver la sección de precisión). Los ataques de daño pueden bajar un stat con
+una probabilidad (`drop`: Psíquico 10 % Def. Esp., Bola Sombra 20 %, Triturar 20 % Def.).
+
+Los que **curan** (`heal`) devuelven una fracción de los PS máximos (Recuperación 50 %; Descanso 100 % y 2 turnos de sueño),
+con 12 s de recarga (`HEAL_COOLDOWN`) y 1 s inmóvil. Los de **absorción** (`drain`) curan `daño × fracción × DRAIN_SCALE`.
+
+**Teletransporte** (`teleport`): contra un salvaje termina la batalla (si lo usa el jugador, o si lo usa el salvaje tras
+recibir un golpe); contra un entrenador, quien lo usa se cambia por otro Pokémon.
+
+La IA los usa así: cura con menos de 45 % de PS (Descanso con menos de 30 %), baja stats cuando al rival le sirve y no está
+ya muy bajo (comparte el enfriamiento de los ataques de estado) y, si es entrenador y solo tiene ataques de estado, se
+teletransporta cada 6 s.

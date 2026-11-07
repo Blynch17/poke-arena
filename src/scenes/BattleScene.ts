@@ -2,8 +2,10 @@ import Phaser from 'phaser';
 import {
   POKEMON, PokemonDef, Party, Move, Stages, Stats, Fighter, StatKey, calcDamage, TYPE_COLOR, ITEMS, ItemId, ENERGY_MAX, ENERGY_REGEN,
   STRUGGLE, newStages, stageMult, maxUses, STAT_NAME, STAGE_MAX, SPEED_STAGE_EFFECT,
-  BALLS, BallId, makeCombatant, WILD_LEVEL_MIN, WILD_LEVEL_MAX, HP_MULT, effectiveness,
+  BALLS, BallId, makeCombatant, WILD_LEVEL_MIN, WILD_LEVEL_MAX, HP_MULT, effectiveness, moveByKey, Debuff, HEAL_LOCK, DRAIN_SCALE,
 } from '../data';
+import { MAX_MOVES, defaultMoves, movesLearnedBetween, withMoves, evolutionsAt, Evolution } from '../moveset';
+import { START_LEVEL, MAX_LEVEL, expAt, expYield } from '../exp';
 import { catchX, captureChance, rollCapture, statusCatchMult } from '../capture';
 import {
   StatusId, Inflict, STATUS_INFO, rollDuration, TURN_MS, FLINCH_MS, FAIL_BLOCK_MS, PARALYSIS_FAIL, CONFUSION_SELF, CONFUSION_SELF_POWER,
@@ -50,12 +52,18 @@ function walkRow(f: Phaser.Math.Vector2): number {
 // Un combatiente en la batalla: la especie a un nivel, con sus stats y su vida máxima ya calculados.
 interface Member {
   def: PokemonDef; level: number; stats: Stats; maxHp: number; hp: number; energy: number; stages: Stages; pp: number[];
+  exp: number;                                                                     // EXP total (solo cuenta en la aventura)
+  own: string[] | null;                                                            // claves de sus ataques (jugador en la aventura); null = los de la especie
+  acc: number;                                                                     // etapas de precisión (baja con Ataque Arena, Pantalla de Humo...)
   status: StatusId | null; statusLeft: number; statusAge: number; tickIn: number; // estado principal (ms que le quedan, ms que lleva)
   confLeft: number;                                                                // confusión (ms que le quedan)
   graceLeft: number;                                                               // ms que resiste nuevos estados tras curarse
 }
 
 const fighter = (m: Member): Fighter => ({ types: m.def.types, stats: m.stats, level: m.level });
+
+// Pasos de después de la batalla (aventura): aprender un ataque nuevo o evolucionar.
+type PostStep = { kind: 'learn'; idx: number; key: string } | { kind: 'evolve'; idx: number };
 
 // Pokébola lanzada contra el Pokémon salvaje.
 interface Thrown { img: Phaser.GameObjects.Image; vx: number; vy: number; id: BallId; dieAt: number }
@@ -139,6 +147,16 @@ export class BattleScene extends Phaser.Scene {
   private teamIds: number[] = [];   // índice en POKEMON de cada Pokémon del jugador
   private trainer: string | null = null; // combate contra un entrenador: no se puede huir ni capturar
   private returnTo: Record<string, unknown> | null = null; // si viene del mundo, a dónde volver al terminar
+  private adventure = false;                  // modo aventura: los Pokémon ganan EXP y suben de nivel
+  private foeSeen = new Set<Member>();         // quiénes han peleado contra el rival que está en pie
+  private expPool = new Map<Member, number>(); // EXP ganada en esta batalla, por Pokémon
+  private expGain: { mem: Member; idx: number; gained: number; from: number; to: number; stats: string }[] = [];
+  private speciesIdx: number[] = [];            // especie actual (índice en POKEMON) de cada Pokémon del jugador; cambia al evolucionar
+  private queue: PostStep[] = [];               // pasos tras la batalla: aprender ataques y evolucionar
+  private postObjs: Phaser.GameObjects.GameObject[] = [];
+  private choice: { sel: number; title: string; sub: string; options: string[]; pick: (i: number) => void } | null = null;
+  private hintText: Phaser.GameObjects.Text | null = null;
+  private wildFleeAt = 0;   // un salvaje con Teletransporte huye a esta hora (this.t) después de que le pegan
 
   private fx!: Fx;
   private statusFx!: StatusFx;
@@ -167,7 +185,7 @@ export class BattleScene extends Phaser.Scene {
     super('Battle');
   }
 
-  create(data: { team: number[]; wild?: boolean; wildId?: string; wildLevel?: number; trainer?: string; returnTo?: Record<string, unknown>; party?: Party; items?: { potion: number; ether: number } }) {
+  create(data: { team: number[]; wild?: boolean; wildId?: string; wildLevel?: number; trainer?: string; trainerLevel?: number; returnTo?: Record<string, unknown>; party?: Party; items?: { potion: number; ether: number } }) {
     this.shots = [];
     this.areas = [];
     this.moveTexts = [];
@@ -179,6 +197,15 @@ export class BattleScene extends Phaser.Scene {
     this.wild = !!data.wild;
     this.returnTo = data.returnTo ?? null;
     this.trainer = data.trainer ?? null;
+    this.adventure = !!data.returnTo;
+    this.foeSeen = new Set();
+    this.expPool = new Map();
+    this.expGain = [];
+    this.queue = [];
+    this.postObjs = [];
+    this.choice = null;
+    this.hintText = null;
+    this.wildFleeAt = 0;
     this.balls = { poke: 10, great: 5, ultra: 3, master: 1 };
     this.armed = null;
     this.thrown = [];
@@ -212,8 +239,12 @@ export class BattleScene extends Phaser.Scene {
     this.fx = new Fx(this);
     this.statusFx = new StatusFx(this);
 
-    const mine = data.team.map((i) => POKEMON[i]);
-    this.player = this.makeSide(true, mine, A.x + 160, A.y + A.h / 2);
+    this.speciesIdx = data.team.map((i) => data.party?.[i]?.species ?? i);   // la especie actual (puede haber evolucionado)
+    const mine = this.speciesIdx.map((s) => POKEMON[s]);
+    // En la aventura cada Pokémon va a su propio nivel (el de la partida, o el inicial); en la arena todos a nivel 50.
+    const mineLevels = this.adventure ? data.team.map((i) => data.party?.[i]?.level ?? START_LEVEL) : [];
+    const mineKeys = this.adventure ? mine.map((def, k) => data.party?.[data.team[k]]?.moves ?? defaultMoves(def.id, mineLevels[k])) : [];
+    this.player = this.makeSide(true, mine, A.x + 160, A.y + A.h / 2, mineLevels, mineKeys);
     if (this.wild) {
       // Un solo Pokémon salvaje, de una especie y un nivel al azar.
       // Si viene de la ruta, ya trae la especie y el nivel; si no, se elige al azar.
@@ -222,7 +253,8 @@ export class BattleScene extends Phaser.Scene {
       this.enemy = this.makeSide(false, [def], A.x + A.w - 160, A.y + A.h / 2, [level]);
     } else {
       const others = Phaser.Utils.Array.Shuffle([...POKEMON]).slice(0, Phaser.Math.Clamp(mine.length, 1, 6));   // el rival lleva tantos Pokémon como tú
-      this.enemy = this.makeSide(false, others, A.x + A.w - 160, A.y + A.h / 2);
+      const lv = data.trainerLevel;   // los entrenadores de la aventura traen su nivel; sube 1 con cada Pokémon del equipo
+      this.enemy = this.makeSide(false, others, A.x + A.w - 160, A.y + A.h / 2, lv ? others.map((_, i) => Math.min(MAX_LEVEL, lv + Math.floor(i / 2))) : []);
     }
 
     this.hud = this.add.graphics().setDepth(50);
@@ -235,11 +267,13 @@ export class BattleScene extends Phaser.Scene {
         const saved = data.party![data.team[i]];
         if (!saved) return;
         mem.hp = Math.min(mem.maxHp, saved.hp);
+        if (saved.exp !== undefined) mem.exp = saved.exp;
         if (saved.pp.length === mem.pp.length) mem.pp = saved.pp.map((n, k) => Math.min(n, maxUses(mem.def.moves[k])));
       });
       const first = this.player.team.findIndex((m) => m.hp > 0);
       if (first > 0) this.switchTo(this.player, first);
     }
+    this.foeSeen.add(this.cur(this.player));
     this.menuLayer = this.add.container(0, 0).setDepth(100);
 
     this.keys = this.input.keyboard!.addKeys('W,A,S,D,Q,E,R,U,I,O,P,SPACE') as Record<string, Phaser.Input.Keyboard.Key>;
@@ -272,10 +306,13 @@ export class BattleScene extends Phaser.Scene {
     g.lineStyle(6, 0xe8f2e8, 1).strokeRect(A.x, A.y, A.w, A.h);
   }
 
-  private makeSide(isPlayer: boolean, defs: PokemonDef[], x: number, y: number, levels: number[] = []): Side {
-    const team: Member[] = defs.map((def, i) => {
-      const c = makeCombatant(def, levels[i] ?? def.level);
-      return { def, ...c, hp: c.maxHp, energy: ENERGY_MAX, stages: newStages(), pp: def.moves.map(maxUses), status: null, statusLeft: 0, statusAge: 0, tickIn: 1000, confLeft: 0, graceLeft: 0 };
+  private makeSide(isPlayer: boolean, defs: PokemonDef[], x: number, y: number, levels: number[] = [], keys: string[][] = []): Side {
+    const team: Member[] = defs.map((rawDef, i) => {
+      const c = makeCombatant(rawDef, levels[i] ?? rawDef.level);
+      // En la aventura los ataques salen de la lista de aprendizaje por nivel (los de la especie en la arena).
+      const own = this.adventure ? (keys[i] ?? defaultMoves(rawDef.id, c.level)) : null;
+      const def = own ? withMoves(rawDef, own) : rawDef;
+      return { def, own: isPlayer ? own : null, acc: 0, ...c, hp: c.maxHp, exp: expAt(c.level), energy: ENERGY_MAX, stages: newStages(), pp: def.moves.map(maxUses), status: null, statusLeft: 0, statusAge: 0, tickIn: 1000, confLeft: 0, graceLeft: 0 };
     });
     const facing = new Phaser.Math.Vector2(isPlayer ? 1 : -1, 0);
     const sprite = this.add.image(x, y, `${defs[0].id}-walk`, 0).setScale(SPRITE_SCALE).setDepth(10);
@@ -328,6 +365,7 @@ export class BattleScene extends Phaser.Scene {
       this.regen(this.player, s);
       this.regen(this.enemy, s);
       if (this.enemy.down && this.enemySwapAt && this.t >= this.enemySwapAt) this.sendNextEnemy();
+      if (this.wildFleeAt && this.t >= this.wildFleeAt && !this.catching && !this.enemy.down) { this.wildFleeAt = 0; this.escapeBattle(this.enemy, this.cur(this.enemy)); }
       this.fx.update(dt);
     }
     this.updateVisuals();
@@ -507,11 +545,16 @@ export class BattleScene extends Phaser.Scene {
     this.catching = false;
     this.onCaptured(mem);
     music.play('victory');
+    this.awardExp(mem);   // capturar también da EXP
+    this.applyExp();
+    const lines = this.expLines();
+    this.buildQueue();
     const bg = this.add.rectangle(480, 320, 960, 640, 0x000000, 0.6).setDepth(90);
-    const t1 = this.add.text(480, 250, '¡CAPTURADO!', { fontSize: '68px', color: '#7fc4ff', fontStyle: 'bold' }).setOrigin(0.5).setDepth(91);
-    const t2 = this.add.text(480, 320, `${mem.def.name}  Nv. ${mem.level}`, { fontSize: '30px', color: '#ffffff' }).setOrigin(0.5).setDepth(91);
-    const t3 = this.add.text(480, 380, (this.returnTo ? 'ENTER para volver al camino' : 'ENTER para volver a elegir equipo'), { fontSize: '22px', color: '#cfe8cf' }).setOrigin(0.5).setDepth(91);
-    this.menuLayer.add([bg, t1, t2, t3]);
+    const t1 = this.add.text(480, lines.length ? 120 : 250, '¡CAPTURADO!', { fontSize: '68px', color: '#7fc4ff', fontStyle: 'bold' }).setOrigin(0.5).setDepth(91);
+    const t2 = this.add.text(480, lines.length ? 185 : 320, `${mem.def.name}  Nv. ${mem.level}`, { fontSize: '30px', color: '#ffffff' }).setOrigin(0.5).setDepth(91);
+    const t3 = this.add.text(480, lines.length ? 580 : 380, this.hintLabel(), { fontSize: '22px', color: '#cfe8cf' }).setOrigin(0.5).setDepth(91);
+    this.hintText = t3;
+    this.menuLayer.add([bg, t1, t2, t3, ...this.expTexts(lines, 240)]);
   }
 
   // Clic izquierdo (o arrastrar con el botón apretado): fija el destino en la arena.
@@ -542,8 +585,10 @@ export class BattleScene extends Phaser.Scene {
    * Precisión del ataque (campo `accuracy`, en %): 0 = sale justo donde se apuntó, 1 = desvío leve, 2 = desvío grande.
    * Con probabilidad (1 - precisión) se desvía; de esas veces el 60 % es leve y el 40 % grande. Con 100 % nunca se desvía.
    */
-  private aimRoll(mv: Move): 0 | 1 | 2 {
-    const acc = mv.accuracy ?? 100;
+  private aimRoll(mv: Move, side?: Side): 0 | 1 | 2 {
+    // Las etapas de precisión del atacante (Ataque Arena...) escalan la precisión: -1 = x3/4, -2 = x3/5, ... como en los juegos.
+    const stage = side ? this.cur(side).acc : 0;
+    const acc = (mv.accuracy ?? 100) * (stage >= 0 ? (3 + stage) / 3 : 3 / (3 - stage));
     if (acc >= 100) return 0;
     const miss = 1 - acc / 100, r = Math.random();
     return r < miss * 0.4 ? 2 : r < miss ? 1 : 0;
@@ -559,7 +604,7 @@ export class BattleScene extends Phaser.Scene {
     return (Math.random() < 0.5 ? -1 : 1) * Math.atan2(lateral, d);
   }
 
-  private aimDeviation(mv: Move, side: Side): number { return this.aimAngle(this.aimRoll(mv), side); }
+  private aimDeviation(mv: Move, side: Side): number { return this.aimAngle(this.aimRoll(mv, side), side); }
 
   /** Para los ataques que caen en un punto (rayo, Vuelo): cuánto se corre el punto cuando falla (leve ~70-120 px, grande ~170-270 px). */
   private missOffset(kind: 0 | 1 | 2): { x: number; y: number } {
@@ -588,6 +633,14 @@ export class BattleScene extends Phaser.Scene {
       }
       return false;
     }
+    if (mv.heal && m.hp >= m.maxHp && !(mv.rest && m.status)) {   // curarse con la vida llena no sirve de nada: no gasta nada
+      if (side.isPlayer && this.t - this.noPpAt > 700) { this.noPpAt = this.t; this.floatText(side.sprite.x, side.sprite.y - 60, '¡Los PS ya están al máximo!', '#9fe0a8'); }
+      return false;
+    }
+    if (mv.teleport && !this.canTeleport(side)) {
+      if (side.isPlayer && this.t - this.noPpAt > 700) { this.noPpAt = this.t; this.floatText(side.sprite.x, side.sprite.y - 60, '¡Pero falló! No queda a quién cambiar', '#cccccc'); }
+      return false;
+    }
     if (m.energy < mv.cost) {
       if (side.isPlayer) this.noEnergyAt = this.t;
       return false;
@@ -609,14 +662,16 @@ export class BattleScene extends Phaser.Scene {
     if (!struggle) m.pp[i]--;
     side.cd[ci] = this.t + mv.cooldown;
     if (struggle && side.isPlayer) this.floatText(side.sprite.x, side.sprite.y - 60, '¡Forcejeo!', '#ffb86b');
-    if (mv.category === 'status' && mv.inflict) {   // ataque de estado: un proyectil que causa el estado si conecta
+    if (mv.category === 'status' && (mv.inflict || mv.debuff)) {   // ataque de estado: un proyectil que causa el estado o baja stats si conecta
       sfx.cast(sfxKey(mv.fx ?? 'zap'), side.sprite.x);
       this.fireShots(side, m, mv);
       return true;
     }
     if (mv.category === 'status') {
       sfx.boost(side.sprite.x);
-      if (mv.transform) this.transform(side, m);
+      if (mv.heal) this.applyHeal(side, m, mv);
+      else if (mv.teleport) this.teleport(side, m);
+      else if (mv.transform) this.transform(side, m);
       else if (Object.keys(mv.boost ?? {}).length === 0) this.splash(side);
       else this.applyBoost(side, m, mv);
       return true;
@@ -702,7 +757,7 @@ export class BattleScene extends Phaser.Scene {
 
   private startLeap(side: Side, m: Member, mv: Move) {
     const cfg = LEAP[mv.leap ?? 'fly'];
-    side.leap = { mv, att: m, t0: this.t, mx: side.sprite.x, my: side.sprite.y, started: false, off: this.missOffset(this.aimRoll(mv)) };
+    side.leap = { mv, att: m, t0: this.t, mx: side.sprite.x, my: side.sprite.y, started: false, off: this.missOffset(this.aimRoll(mv, side)) };
     side.lockUntil = this.t + cfg.up + cfg.mark + cfg.dive + 300;
   }
 
@@ -761,7 +816,7 @@ export class BattleScene extends Phaser.Scene {
 
   // Ataque de área: se crea con su geometría y se va dibujando y comprobando cada cuadro (ver updateAreas).
   private castArea(side: Side, m: Member, mv: Move) {
-    const kind = this.aimRoll(mv), target = side === this.player ? this.enemy : this.player;
+    const kind = this.aimRoll(mv, side), target = side === this.player ? this.enemy : this.player;
     const f = mv.style === 'nova' || mv.style === 'strike' ? side.facing : this.rotate(side.facing, this.aimAngle(kind, side));   // las de dirección se desvían; la onda redonda y el rayo del cielo, no
     const off = mv.style === 'strike' ? this.missOffset(kind) : undefined;                                // el rayo del cielo cae corrido del rival
     const a = buildArea(mv, side.sprite.x, side.sprite.y + 6, f.x, f.y, A, { x: target.sprite.x + (off?.x ?? 0), y: target.sprite.y + 8 + (off?.y ?? 0) });
@@ -1001,6 +1056,8 @@ export class BattleScene extends Phaser.Scene {
     owner: Side, att: Member, mv: Move, target: Side, px: number, py: number, dirx: number, diry: number, kbMul: number,
   ) {
     const mem = this.cur(target);
+    // Un Pokémon salvaje que sabe Teletransporte huye en cuanto le pegan (o le tiran un ataque de estado).
+    if (this.wild && target === this.enemy && !this.wildFleeAt && !this.catching && mem.def.moves.some((m) => m.teleport)) this.wildFleeAt = this.t + 700;
     if (mv.category === 'status') { this.statusHit(mv, owner, target, px, py, dirx, diry); return; }
     if (mem.status === 'freeze' && mv.type === 'fire') this.cureStatus(target, 'status');   // el fuego descongela
     const { damage: dmg, eff, crit } = this.damageOf(att, mem, mv, true);
@@ -1022,8 +1079,19 @@ export class BattleScene extends Phaser.Scene {
       const notes = [crit ? '¡Golpe crítico!' : '', eff > 1 ? '¡Muy eficaz!' : eff < 1 ? 'Poco eficaz...' : ''].filter(Boolean);
       notes.forEach((n, i) => this.floatText(tx, ty - 22 * (i + 1), n, n.startsWith('¡G') ? '#ff6b6b' : eff > 1 ? '#ff9d3f' : '#9fb8d8'));
     }
+    if (mv.drain && dmg > 0 && eff > 0 && att.hp > 0) {   // absorbe parte del daño: cura a quien ataca
+      const gain = Math.min(att.maxHp - att.hp, Math.round(dmg * mv.drain * DRAIN_SCALE));
+      if (gain > 0) {
+        att.hp += gain;
+        this.floatText(owner.sprite.x, owner.sprite.y - 50, `+${gain} PS`, '#7dff9a');
+        this.fx.rise(owner.sprite.x, owner.sprite.y, 0x7dff9a, 5);
+      }
+    }
     if (mem.hp <= 0) this.faint(target);
-    else if (mv.inflict && eff > 0 && Math.random() * 100 < mv.inflict.chance) this.giveStatus(target, mv.inflict.status, false);
+    else {
+      if (mv.inflict && eff > 0 && Math.random() * 100 < mv.inflict.chance) this.giveStatus(target, mv.inflict.status, false);
+      if (mv.drop && eff > 0 && Math.random() * 100 < mv.drop.chance) this.applyDebuff(target, mv.drop.stages, mv.type);
+    }
 
     if (mv.recoil && att.hp > 0) {
       const back = Math.floor(att.maxHp / 4);
@@ -1031,6 +1099,88 @@ export class BattleScene extends Phaser.Scene {
       this.floatText(owner.sprite.x, owner.sprite.y - 50, `-${back} (retroceso)`, '#ff9d9d');
       if (att.hp <= 0 && this.cur(owner) === att && !owner.down) this.faint(owner);
     }
+  }
+
+  // ---------- bajar stats, curar y teletransportarse ----------
+
+  /** Baja stats (y precisión) del Pokémon de `target`: etapas de -6 a 6, como en los juegos. */
+  private applyDebuff(target: Side, d: Debuff, type: Move['type']) {
+    const m = this.cur(target), x = target.sprite.x, y = target.sprite.y - 56;
+    const notes: string[] = [];
+    (Object.keys(d) as (StatKey | 'acc')[]).forEach((k) => {
+      const drop = d[k] ?? 0;
+      if (!drop) return;
+      const cur = k === 'acc' ? m.acc : m.stages[k];
+      const next = Phaser.Math.Clamp(cur + drop, -STAGE_MAX, STAGE_MAX);
+      if (k === 'acc') m.acc = next; else m.stages[k] = next;
+      const name = k === 'acc' ? 'Precisión' : STAT_NAME[k];
+      notes.push(next === cur ? `${name} no puede bajar más` : `${name} ${cur - next >= 2 ? '▼▼' : '▼'}`);
+    });
+    notes.forEach((n, i) => this.floatText(x, y - 22 * i, n, '#9fd0ff'));
+    sfx.status('flinch', target.sprite.x);
+    this.fx.rise(target.sprite.x, target.sprite.y + 20, TYPE_COLOR[type], 5);
+  }
+
+  /** Ataque que cura una fracción de los PS máximos de quien lo usa (Descanso además lo deja dormido 2 turnos). */
+  private applyHeal(side: Side, m: Member, mv: Move) {
+    const before = m.hp;
+    if (mv.rest) { m.status = null; m.confLeft = 0; m.graceLeft = 0; }
+    m.hp = Math.min(m.maxHp, m.hp + Math.round(m.maxHp * (mv.heal ?? 0.5)));
+    const x = side.sprite.x, y = side.sprite.y;
+    this.floatText(x, y - 56, `+${Math.round(m.hp - before)} PS`, '#7dff9a');
+    this.fx.rise(x, y, 0x7dff9a, 10);
+    side.lockUntil = this.t + (mv.lock ?? HEAL_LOCK);
+    side.auraUntil = side.lockUntil;
+    if (mv.rest) {
+      this.giveStatus(side, 'sleep', true);
+      m.statusLeft = 2 * TURN_MS;
+    }
+  }
+
+  /** ¿Puede teletransportarse? Contra un salvaje siempre; contra un entrenador necesita a quién cambiar. */
+  private canTeleport(side: Side): boolean {
+    return this.wild || side.team.some((mm, i) => i !== side.active && mm.hp > 0);
+  }
+
+  /** Teletransporte, como en los juegos: con un Pokémon salvaje termina la batalla (huye quien lo use); contra un
+   *  entrenador, quien lo usa se cambia por otro de su equipo. */
+  private teleport(side: Side, m: Member) {
+    this.floatText(side.sprite.x, side.sprite.y - 60, '¡Teletransporte!', '#ff9fd0');
+    this.fx.rise(side.sprite.x, side.sprite.y, 0xff5cae, 12);
+    if (this.wild) { this.escapeBattle(side, m); return; }
+    if (side.isPlayer) { this.openMenu('team', true); return; }
+    this.aiSwitchOut();
+  }
+
+  /** La batalla termina porque alguien huyó (Teletransporte contra un salvaje): sin EXP ni captura. */
+  private escapeBattle(side: Side, m: Member) {
+    if (this.over) return;
+    this.over = true;
+    this.paused = false;
+    music.play('victory');
+    const msg = side.isPlayer ? `¡${m.def.name} usó Teletransporte y escapó!` : `¡${m.def.name} salvaje usó Teletransporte y escapó!`;
+    const bg = this.add.rectangle(480, 320, 960, 640, 0x000000, 0.6).setDepth(90);
+    const t1 = this.add.text(480, 270, msg, { fontSize: '34px', color: '#ff9fd0', fontStyle: 'bold', align: 'center', wordWrap: { width: 800 } }).setOrigin(0.5).setDepth(91);
+    const t2 = this.add.text(480, 360, this.returnTo ? 'ENTER para volver al camino' : 'ENTER para volver a elegir equipo', { fontSize: '24px', color: '#fff' }).setOrigin(0.5).setDepth(91);
+    this.hintText = t2;
+    this.menuLayer.add([bg, t1, t2]);
+    this.queue = [];
+  }
+
+  /** El rival (entrenador) cambia de Pokémon al mejor que le quede. */
+  private aiSwitchOut() {
+    const e = this.enemy, foe = this.cur(this.player);
+    let best = -1, bv = -9;
+    e.team.forEach((m, i) => {
+      if (i === e.active || m.hp <= 0) return;
+      const v = this.aiMatchup(m, foe) + (m.hp / m.maxHp - 0.5) * 0.3;
+      if (v > bv) { bv = v; best = i; }
+    });
+    if (best < 0) return;
+    this.ai.lastSwitch = this.t;
+    this.switchTo(e, best);
+    e.invuln = this.t + 900;
+    this.toast(`El rival cambia a ${this.cur(e).def.name}`);
   }
 
   // ---------- estados alterados ----------
@@ -1146,6 +1296,12 @@ export class BattleScene extends Phaser.Scene {
   private statusHit(mv: Move, owner: Side, target: Side, px: number, py: number, dirx: number, diry: number) {
     this.fx.impact(mv.fx ?? 'zap', px, py, Math.atan2(diry, dirx), 30);
     const mem = this.cur(target);
+    if (mv.debuff) {
+      if (mv.type === 'electric' && effectiveness('electric', mem.def.types) === 0) { this.floatText(target.sprite.x, target.sprite.y - 76, 'No afecta...', '#cccccc'); return; }
+      this.applyDebuff(target, mv.debuff, mv.type);
+      if (owner === this.enemy) this.ai.statusReadyAt = Math.max(this.ai.statusReadyAt, this.t + AI_STATUS_COOLDOWN_MS * 0.6);
+      return;
+    }
     if (mv.type === 'electric' && effectiveness('electric', mem.def.types) === 0) {   // Onda Trueno no afecta a los de tipo tierra
       this.floatText(target.sprite.x, target.sprite.y - 76, 'No afecta...', '#cccccc');
       return;
@@ -1214,6 +1370,7 @@ export class BattleScene extends Phaser.Scene {
     side.arrow.setVisible(false);
     side.aura.setVisible(false);
     this.floatText(side.sprite.x, side.sprite.y - 30, `¡${this.cur(side).def.name} se debilitó!`, '#ff6666');
+    if (!side.isPlayer) this.awardExp(fm);
     const alive = side.team.some((m) => m.hp > 0);
     if (side.isPlayer) {
       if (alive) this.openMenu('team', true);
@@ -1227,6 +1384,7 @@ export class BattleScene extends Phaser.Scene {
     const next = e.team.findIndex((m) => m.hp > 0);
     this.enemySwapAt = 0;
     this.switchTo(e, next);
+    this.foeSeen = new Set([this.cur(this.player)]);   // el siguiente rival lo enfrentan quienes estén en la arena ahora
     e.sprite.setPosition(A.x + A.w - 160, A.y + A.h / 2);
     e.invuln = this.t + 1200;
     this.toast(`El rival envía a ${this.cur(e).def.name}`);
@@ -1235,12 +1393,15 @@ export class BattleScene extends Phaser.Scene {
   private switchTo(side: Side, idx: number) {
     const old = this.cur(side);
     old.stages = newStages(); // las mejoras se pierden al retirar al Pokémon
+    old.acc = 0;
     old.confLeft = 0;         // la confusión y el contador del tóxico se reinician al retirarlo; los demás estados siguen
     old.statusAge = 0;
     side.flashUntil = 0;
     side.blockUntil = 0;
     side.active = idx;
     this.cur(side).stages = newStages();
+    this.cur(side).acc = 0;
+    if (side.isPlayer) this.foeSeen.add(this.cur(side));
     side.lockUntil = 0;
     side.auraUntil = 0;
     side.dash = null;
@@ -1261,13 +1422,198 @@ export class BattleScene extends Phaser.Scene {
     this.over = true;
     if (this.returnTo) this.returnTo = { ...this.returnTo, result: victory ? 'win' : 'lose' };
     music.play(victory ? 'victory' : 'defeat');
+    this.applyExp();   // aunque se pierda, lo que se alcanzó a derrotar cuenta
+    const lines = this.expLines();
+    this.buildQueue();
     const bg = this.add.rectangle(480, 320, 960, 640, 0x000000, 0.6).setDepth(90);
-    const t1 = this.add.text(480, 270, victory ? '¡VICTORIA!' : 'DERROTA', {
+    const t1 = this.add.text(480, lines.length ? 150 : 270, victory ? '¡VICTORIA!' : 'DERROTA', {
       fontSize: '72px', color: victory ? '#ffd23f' : '#ff6666', fontStyle: 'bold',
     }).setOrigin(0.5).setDepth(91);
-    const t2 = this.add.text(480, 350, (this.returnTo ? 'ENTER para volver al camino' : 'ENTER para volver a elegir equipo'), { fontSize: '24px', color: '#fff' })
+    const t2 = this.add.text(480, lines.length ? 560 : 350, this.hintLabel(), { fontSize: '24px', color: '#fff' })
       .setOrigin(0.5).setDepth(91);
-    this.menuLayer.add([bg, t1, t2]);
+    this.hintText = t2;
+    this.menuLayer.add([bg, t1, t2, ...this.expTexts(lines, 220)]);
+  }
+
+  // ---------- experiencia y niveles (aventura) ----------
+
+  /** El Pokémon rival `foe` fue derrotado: su EXP se reparte solo entre los Pokémon que pelearon contra él y siguen con PS. */
+  private awardExp(foe: Member) {
+    if (!this.adventure) return;
+    const earners = this.player.team.filter((m) => this.foeSeen.has(m) && m.hp > 0);
+    for (const mem of earners) {
+      const amount = expYield(foe.def, foe.level, mem.level, !!this.trainer, earners.length);
+      this.expPool.set(mem, (this.expPool.get(mem) ?? 0) + Math.max(1, amount));
+    }
+  }
+
+  /** Suma la EXP ganada y sube de nivel lo que corresponda: recalcula stats y PS máximos (los PS nuevos se suman a los actuales, como en los juegos). */
+  private applyExp() {
+    if (!this.adventure || this.expGain.length) return;
+    this.player.team.forEach((mem, idx) => {
+      const gained = this.expPool.get(mem) ?? 0;
+      if (gained <= 0) return;
+      const from = mem.level, base = POKEMON[this.speciesIdx[idx]];
+      mem.exp += gained;
+      while (mem.level < MAX_LEVEL && mem.exp >= expAt(mem.level + 1)) mem.level++;
+      let stats = '';
+      if (mem.level > from) {
+        const old = mem.stats, c = makeCombatant(base, mem.level);
+        const d = (a: number, b: number) => `${a} → ${b}`;
+        stats = `PS ${d(old.hp, c.stats.hp)} · Atq ${d(old.atk, c.stats.atk)} · Def ${d(old.def, c.stats.def)} · AtE ${d(old.spa, c.stats.spa)} · DeE ${d(old.spd, c.stats.spd)} · Vel ${d(old.spe, c.stats.spe)}`;
+        if (mem.hp > 0) mem.hp += c.maxHp - mem.maxHp;
+        mem.stats = c.stats;
+        mem.maxHp = c.maxHp;
+      }
+      this.expGain.push({ mem, idx, gained, from, to: mem.level, stats });
+    });
+  }
+
+  // ---------- aprender ataques y evolucionar (después de la batalla, en la aventura) ----------
+
+  private hintLabel(): string {
+    return this.queue.length ? 'ENTER para continuar' : this.returnTo ? 'ENTER para volver al camino' : 'ENTER para volver a elegir equipo';
+  }
+
+  /** Arma la lista de pasos: por cada Pokémon que subió de nivel, los ataques que aprende en esos niveles y luego su evolución. */
+  private buildQueue() {
+    this.queue = [];
+    for (const g of this.expGain) {
+      if (g.to <= g.from) continue;
+      const base = POKEMON[this.speciesIdx[g.idx]];
+      for (const key of movesLearnedBetween(base.id, g.from, g.to, g.mem.own ?? [])) this.queue.push({ kind: 'learn', idx: g.idx, key });
+      if (evolutionsAt(base.id, g.to).length) this.queue.push({ kind: 'evolve', idx: g.idx });
+    }
+  }
+
+  private clearPost() {
+    this.postObjs.forEach((o) => o.destroy());
+    this.postObjs = [];
+  }
+
+  /** Cuadro de mensaje sobre la pantalla de resultados. */
+  private postPanel(title: string, lines: string[], sprites: string[] = []): void {
+    this.clearPost();
+    const add = <T extends Phaser.GameObjects.GameObject>(o: T) => { this.postObjs.push(o); return o; };
+    add(this.add.rectangle(480, 320, 900, 470, 0x1b2a1e).setStrokeStyle(4, 0xffd23f).setDepth(120));
+    add(this.add.text(480, 120, title, { fontSize: '30px', color: '#ffd23f', fontStyle: 'bold', align: 'center', wordWrap: { width: 840 } }).setOrigin(0.5, 0).setDepth(121));
+    sprites.forEach((key, i) => {
+      if (this.textures.exists(key)) add(this.add.image(480 + (i - (sprites.length - 1) / 2) * 260, 270, key).setScale(1.4).setDepth(121));
+    });
+    lines.forEach((l, i) => add(this.add.text(480, (sprites.length ? 390 : 230) + i * 34, l, { fontSize: '22px', color: '#e8f4e8', align: 'center', wordWrap: { width: 840 } }).setOrigin(0.5, 0).setDepth(121)));
+    add(this.add.text(480, 506, this.queue.length ? 'ENTER para continuar' : this.returnTo ? 'ENTER para volver al camino' : 'ENTER para volver a elegir equipo', { fontSize: '18px', color: '#cfe8cf' }).setOrigin(0.5).setDepth(121));
+  }
+
+  /** Menú de opciones (↑ ↓ y ENTER) sobre la pantalla de resultados. */
+  private showChoice(title: string, sub: string, options: string[], pick: (i: number) => void) {
+    this.choice = { sel: 0, title, sub, options, pick };
+    this.drawChoice();
+  }
+
+  private drawChoice() {
+    const c = this.choice;
+    if (!c) return;
+    this.clearPost();
+    const add = <T extends Phaser.GameObjects.GameObject>(o: T) => { this.postObjs.push(o); return o; };
+    add(this.add.rectangle(480, 320, 900, 480, 0x1b2a1e).setStrokeStyle(4, 0xffd23f).setDepth(120));
+    add(this.add.text(480, 100, c.title, { fontSize: '26px', color: '#ffd23f', fontStyle: 'bold', align: 'center', wordWrap: { width: 840 } }).setOrigin(0.5, 0).setDepth(121));
+    add(this.add.text(480, 168, c.sub, { fontSize: '18px', color: '#cfe8cf', align: 'center', wordWrap: { width: 840 } }).setOrigin(0.5, 0).setDepth(121));
+    c.options.forEach((o, i) => {
+      const y = 232 + i * 52, on = i === c.sel;
+      add(this.add.rectangle(480, y + 18, 780, 44, on ? 0x2f5236 : 0x24382a).setStrokeStyle(3, on ? 0xffd23f : 0x3f5c48).setDepth(121));
+      add(this.add.text(120, y + 4, `${on ? '▶ ' : '   '}${o}`, { fontSize: '20px', color: on ? '#ffffff' : '#cfe8cf' }).setDepth(122));
+    });
+    add(this.add.text(480, 560, '↑ ↓ elegir · ENTER aceptar', { fontSize: '16px', color: '#cfe8cf' }).setOrigin(0.5).setDepth(121));
+  }
+
+  private onPostKey(e: KeyboardEvent) {
+    const c = this.choice;
+    if (c) {
+      if (e.key === 'ArrowDown') c.sel = (c.sel + 1) % c.options.length;
+      else if (e.key === 'ArrowUp') c.sel = (c.sel + c.options.length - 1) % c.options.length;
+      else if (e.key === 'Enter') { this.choice = null; c.pick(c.sel); return; }
+      this.drawChoice();
+      return;
+    }
+    if (e.key !== 'Enter') return;
+    if (this.postObjs.length === 0 && !this.queue.length) { this.leave(); return; }
+    this.nextStep();
+  }
+
+  private nextStep() {
+    this.clearPost();
+    const step = this.queue.shift();
+    this.hintText?.setText(this.hintLabel());
+    if (!step) { this.leave(); return; }
+    const mem = this.player.team[step.idx];
+    if (step.kind === 'learn') this.learnStep(step.idx, step.key);
+    else this.evolveStep(step.idx, mem);
+  }
+
+  private typeLine(m: ReturnType<typeof moveByKey>): string {
+    return `${m.type} · ${m.category === 'status' ? 'Estado' : `Potencia ${m.power}`} · PP ${maxUses(m)}`;
+  }
+
+  private learnStep(idx: number, key: string) {
+    const mem = this.player.team[idx], mv = moveByKey(key), own = mem.own ?? (mem.own = []);
+    if (own.length < MAX_MOVES) {
+      this.teach(mem, own.length, key);
+      this.postPanel(`¡${mem.def.name} aprendió ${mv.name}!`, [this.typeLine(mv)]);
+      return;
+    }
+    this.showChoice(
+      `${mem.def.name} quiere aprender ${mv.name}`,
+      `${this.typeLine(mv)}\nPero ya conoce 4 ataques. ¿Cuál olvida?`,
+      [...own.map((k) => { const m = moveByKey(k); return `${m.name}   —   ${this.typeLine(m)}`; }), `No aprender ${mv.name}`],
+      (i) => {
+        if (i >= own.length) { this.postPanel(`${mem.def.name} no aprendió ${mv.name}.`, []); return; }
+        const old = moveByKey(own[i]).name;
+        this.teach(mem, i, key);
+        this.postPanel(`1, 2 y... ¡Puf!`, [`${mem.def.name} olvidó ${old} y aprendió ${mv.name}.`]);
+      },
+    );
+  }
+
+  /** Pone el ataque `key` en el hueco `slot` (con sus PP completos) y actualiza lo que usa la batalla. */
+  private teach(mem: Member, slot: number, key: string) {
+    const own = mem.own ?? (mem.own = []);
+    own[slot] = key;
+    mem.pp[slot] = maxUses(moveByKey(key));
+    mem.def = withMoves(mem.def, own);
+  }
+
+  private evolveStep(idx: number, mem: Member) {
+    const base = POKEMON[this.speciesIdx[idx]];
+    const options = evolutionsAt(base.id, mem.level);
+    if (!options.length) { this.nextStep(); return; }
+    if (options.length === 1) { this.evolve(idx, mem, options[0]); return; }
+    this.showChoice(`¡${base.name} está evolucionando!`, '¿En qué quiere evolucionar?', options.map((o) => POKEMON[o.toIndex].name), (i) => this.evolve(idx, mem, options[i]));
+  }
+
+  private evolve(idx: number, mem: Member, evo: Evolution) {
+    const from = POKEMON[this.speciesIdx[idx]], to = POKEMON[evo.toIndex];
+    const c = makeCombatant(to, mem.level);
+    if (mem.hp > 0) mem.hp += c.maxHp - mem.maxHp;
+    mem.stats = c.stats;
+    mem.maxHp = c.maxHp;
+    this.speciesIdx[idx] = evo.toIndex;
+    mem.def = withMoves(to, mem.own ?? []);
+    if (evolutionsAt(to.id, mem.level).length) this.queue.unshift({ kind: 'evolve', idx });   // si ya cumple el nivel de la siguiente, sigue
+    this.postPanel(`¡${from.name} evolucionó a ${to.name}!`, [`Nivel ${mem.level}  ·  PS ${c.stats.hp}  Atq ${c.stats.atk}  Def ${c.stats.def}  AtE ${c.stats.spa}  DeE ${c.stats.spd}  Vel ${c.stats.spe}`], [`${from.id}-front`, `${to.id}-front`]);
+  }
+
+  private expLines(): { text: string; color: string }[] {
+    const out: { text: string; color: string }[] = [];
+    for (const g of this.expGain) {
+      out.push({ text: `${g.mem.def.name}  +${g.gained} EXP${g.to > g.from ? `   ¡Nivel ${g.from} → ${g.to}!` : ''}`, color: g.to > g.from ? '#ffd23f' : '#cfe8cf' });
+      if (g.stats) out.push({ text: g.stats, color: '#9fd0ff' });
+    }
+    return out;
+  }
+
+  private expTexts(lines: { text: string; color: string }[], y0: number): Phaser.GameObjects.Text[] {
+    const small = lines.length > 8;
+    return lines.map((l, i) => this.add.text(480, y0 + i * (small ? 26 : 30), l.text, { fontSize: l.color === '#9fd0ff' ? '15px' : '21px', color: l.color }).setOrigin(0.5).setDepth(91));
   }
 
   // ---------- IA rival ----------
@@ -1488,6 +1834,19 @@ export class BattleScene extends Phaser.Scene {
     this.toast(`El rival cambia a ${this.cur(e).def.name}`);
   }
 
+  // ¿Vale la pena bajarle estos stats al rival? Sí si alguno es relevante para él y todavía no está muy bajo.
+  private aiWorthDebuff(mv: Move, foe: Member): boolean {
+    return (Object.keys(mv.debuff!) as (StatKey | 'acc')[]).some((k) => {
+      const drop = mv.debuff![k] ?? 0;
+      if (!drop) return false;
+      if (k === 'acc') return foe.acc > -2;
+      if (foe.stages[k] <= -2) return false;
+      if (k === 'atk') return foe.stats.atk >= foe.stats.spa * 0.8;
+      if (k === 'spa') return foe.stats.spa >= foe.stats.atk * 0.8;
+      return true;
+    });
+  }
+
   // ¿Vale la pena lanzarle este ataque de estado al rival?
   private aiWorthStatus(mv: Move, foe: Member): boolean {
     const st = mv.inflict!.status as StatusId, t = foe.def.types;
@@ -1524,6 +1883,19 @@ export class BattleScene extends Phaser.Scene {
     // Ditto se transforma lo antes posible en cuanto puede.
     const tf = moves.findIndex((mv, i) => mv.transform && ready(i));
     if (tf >= 0 && this.tryFire(e, tf)) { ai.nextFire = this.t + 1500; return; }
+    // Curarse: con poca vida y un ataque que cura (Descanso solo si está muy mal).
+    const heal = moves.findIndex((mv, i) => mv.heal && ready(i) && mem.hp < mem.maxHp * (mv.rest ? 0.3 : 0.45));
+    if (heal >= 0 && Math.random() < 0.85 && this.tryFire(e, heal)) { ai.nextFire = this.t + 1500; return; }
+    // Teletransporte (rival entrenador): si no tiene con qué hacer daño, se cambia por otro Pokémon de vez en cuando.
+    const tp = moves.findIndex((mv, i) => mv.teleport && ready(i));
+    if (tp >= 0 && !this.wild && this.t >= ai.lastSwitch + 6000 && moves.every((mv) => mv.category === 'status') && this.tryFire(e, tp)) { ai.nextFire = this.t + 1500; return; }
+    // Bajar stats del rival: de vez en cuando, si le sirve y no está ya muy bajo.
+    const dbIdx = moves.findIndex((mv, i) => mv.debuff && ready(i) && inRange(mv) && this.aiWorthDebuff(mv, foe));
+    if (dbIdx >= 0 && this.t >= ai.statusReadyAt && Math.random() < 0.5 && this.tryFire(e, dbIdx)) {
+      ai.nextFire = this.t + 700 + Math.random() * 500;
+      ai.statusReadyAt = this.t + AI_STATUS_COOLDOWN_MS * 0.5 + Math.random() * 2000;
+      return;
+    }
     // Ataque de estado (dormir, paralizar...): si el rival está libre de estados y le sirve, lo prueba antes que otro ataque.
     const stIdx = moves.findIndex((mv, i) => mv.category === 'status' && mv.inflict && ready(i) && inRange(mv) && this.aiWorthStatus(mv, foe));
     if (stIdx >= 0 && this.t >= ai.statusReadyAt && Math.random() < 0.65 && this.tryFire(e, stIdx)) {
@@ -1558,7 +1930,7 @@ export class BattleScene extends Phaser.Scene {
 
     const cand = moves.map((_, i) => i).filter((i) => dmg[i] > 0 && ready(i));
     if (!cand.length) {   // sin ataques que hagan daño (Magikarp): usa el que no hace nada, de vez en cuando
-      const idle = moves.findIndex((mv, i) => mv.category === 'status' && !mv.inflict && !mv.transform && Object.keys(mv.boost ?? {}).length === 0 && ready(i));
+      const idle = moves.findIndex((mv, i) => mv.category === 'status' && !mv.inflict && !mv.transform && !mv.teleport && !mv.heal && !mv.debuff && Object.keys(mv.boost ?? {}).length === 0 && ready(i));
       if (idle >= 0 && this.tryFire(e, idle)) { ai.nextFire = this.t + 1200; return; }
     }
     let pick = -1;
@@ -1747,10 +2119,7 @@ export class BattleScene extends Phaser.Scene {
       return;
     }
     if (this.catching) return; // la secuencia de captura no se interrumpe
-    if (this.over) {
-      if (e.key === 'Enter') this.leave();
-      return;
-    }
+    if (this.over) { this.onPostKey(e); return; }
     if (!this.paused) {
       if (e.key === 'Enter') this.openMenu('main');
       return;
@@ -1785,9 +2154,14 @@ export class BattleScene extends Phaser.Scene {
   private collectParty(): Party {
     const out: Party = {};
     this.player.team.forEach((mem, i) => {
-      const base = POKEMON[this.teamIds[i]];
+      const base = POKEMON[this.speciesIdx[i]];
       const transformed = mem.def.id !== base.id;   // Ditto copió los ataques del rival: sus PP propios no cambian
-      out[this.teamIds[i]] = { hp: mem.hp, pp: transformed ? base.moves.map(maxUses) : [...mem.pp] };
+      const own = mem.own;
+      const ownPp = own && own.length ? own.map((k) => maxUses(moveByKey(k))) : base.moves.map(maxUses);
+      out[this.teamIds[i]] = {
+        hp: mem.hp, pp: transformed ? ownPp : [...mem.pp], level: mem.level, exp: mem.exp,
+        moves: own ? [...own] : undefined, species: this.speciesIdx[i],
+      };
     });
     return out;
   }
@@ -1892,6 +2266,7 @@ export class BattleScene extends Phaser.Scene {
     return p.team.map((mem, i) => ({
       def: mem.def, level: mem.level, hp: mem.hp, maxHp: mem.maxHp, stats: mem.stats, pp: mem.pp,
       tag: i === p.active && !p.down ? 'en combate' : undefined,
+      exp: this.adventure ? { cur: mem.exp, from: expAt(mem.level), to: expAt(mem.level + 1) } : undefined,
     }));
   }
 

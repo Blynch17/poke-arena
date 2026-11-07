@@ -2,8 +2,9 @@
 // Los stats base y los tipos son los de los juegos actuales; los ataques son movimientos que cada especie aprende de
 // verdad (por nivel, MT/MO o tutor) en alguna entrega. Para sumar o cambiar un ataque basta editar `MOVES`.
 
-import type { PType, Category, Stages } from './data';
+import type { PType, Category, Stages, Debuff } from './data';
 import type { StatusId, Inflict } from './status';
+import { GEN_MOVES, GEN_BOOSTS, GEN_STATUS, GEN_INFLICT, GEN_ACCURACY, GEN_DEBUFFS, GEN_HEALS, GEN_DRAIN, GEN_DROPS } from './moves_gen';
 
 /** Datos opcionales de un ataque: alcance (área), proyectiles en abanico (multi, spread) y bumerán. */
 type MoveExtra = {
@@ -164,7 +165,8 @@ export const BOOSTS: Record<string, BoostRow> = {
   nastyplot: ['Maquinación', 'dark', 20, { spa: 2 }],
   meditate: ['Meditación', 'psychic', 40, { atk: 1 }],
   splash: ['Salpicadura', 'normal', 40, {}],          // no hace nada, como en los juegos
-  transform: ['Transformación', 'normal', 10, {}],    // todavía sin efecto
+  transform: ['Transformación', 'normal', 10, {}],    // Ditto se convierte en el rival
+  teleport: ['Teletransporte', 'psychic', 20, {}],    // contra un salvaje termina la batalla; contra un entrenador cambia de Pokémon
 };
 
 
@@ -186,6 +188,26 @@ export const STATUS_MOVES: Record<string, StatusMoveRow> = {
   willowisp: ['Fuego Fatuo', 'fire', 15, 'ember', 'burn'],
   supersonic: ['Supersónico', 'normal', 20, 'wind', 'confusion'],
   confuseray: ['Rayo Confuso', 'ghost', 10, 'ghost', 'confusion'],
+};
+
+/** Ataque de estado que baja stats del rival: nombre, tipo, PP, efecto del proyectil y bajada. Todos los de la lista se
+ *  generan con tools/gen_learnsets.py (moves_gen.ts); aquí se pueden sumar a mano. */
+type DebuffRow = [string, PType, number, string, Debuff];
+export const DEBUFFS: Record<string, DebuffRow> = {};
+
+/** Ataque de estado que cura: nombre, tipo, PP y fracción de los PS máximos que recupera. */
+type HealRow = [string, PType, number, number];
+export const HEALS: Record<string, HealRow> = {};
+
+/** Ataques de daño que curan a quien los usa una fracción del daño que hacen (por nombre; juegos: 50 % casi siempre). */
+export const DRAIN: Record<string, number> = {
+  'Megaagotar': 0.5, 'Gigadrenado': 0.5, 'Chupavidas': 0.5, 'Come Sueños': 0.5,
+};
+
+/** Ataques de daño que a veces bajan stats del rival (por nombre): [bajada, probabilidad %]. Valores de los juegos. */
+export const DROPS: Record<string, [Debuff, number]> = {
+  'Psíquico': [{ spd: -1 }, 10], 'Bola Sombra': [{ spd: -1 }, 20], 'Triturar': [{ def: -1 }, 20], 'Rayo Burbuja': [{ spe: -1 }, 10],
+  'Ácido': [{ spd: -1 }, 10], 'Foco Resplandor': [{ spd: -1 }, 10], 'Zumbido': [{ spd: -1 }, 10], 'Rayo Aurora': [{ atk: -1 }, 10],
 };
 
 /**
@@ -377,3 +399,15 @@ export const SPECIES: SpeciesRow[] = [
   ['mewtwo', 'Mewtwo', 150, ['psychic'], [106, 110, 90, 154, 90, 130], 3, ['psystrike', 'shadowball', 'icebeam', 'calmmind']],
   ['mew', 'Mew', 151, ['psychic'], [100, 100, 100, 100, 100, 100], 45, ['psychic', 'flamethrower', 'thunderbolt', 'calmmind']],
 ];
+
+// Ataques que solo aparecen en las listas de aprendizaje por nivel (generados por tools/gen_learnsets.py): se suman al
+// catálogo sin pisar los que ya estaban.
+for (const [k, v] of Object.entries(GEN_MOVES)) if (!(k in MOVES)) MOVES[k] = v;
+for (const [k, v] of Object.entries(GEN_BOOSTS)) if (!(k in BOOSTS)) BOOSTS[k] = v;
+for (const [k, v] of Object.entries(GEN_STATUS)) if (!(k in STATUS_MOVES)) STATUS_MOVES[k] = v;
+for (const [k, v] of Object.entries(GEN_INFLICT)) if (!(k in INFLICT)) INFLICT[k] = v;
+for (const [k, v] of Object.entries(GEN_ACCURACY)) if (!(k in ACCURACY)) ACCURACY[k] = v;
+for (const [k, v] of Object.entries(GEN_DEBUFFS)) if (!(k in DEBUFFS)) DEBUFFS[k] = v;
+for (const [k, v] of Object.entries(GEN_HEALS)) if (!(k in HEALS)) HEALS[k] = v;
+for (const [k, v] of Object.entries(GEN_DRAIN)) if (!(k in DRAIN)) DRAIN[k] = v;
+for (const [k, v] of Object.entries(GEN_DROPS)) if (!(k in DROPS)) DROPS[k] = v;

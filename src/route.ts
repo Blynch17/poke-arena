@@ -4,7 +4,7 @@
 export const TILE = 64; // px en pantalla de cada tile (el arte mide 32 px y se amplía x2, como el sprite del entrenador)
 
 /** El entrenador rival: espera en el borde del camino y reta a quien cruce su línea de visión. */
-export const RIVAL = { x: 12, y: 16, dir: 'left' as const, sight: 4, name: 'El huaso Anselmo' };
+export const RIVAL = { x: 12, y: 16, dir: 'left' as const, sight: 4, name: 'El huaso Anselmo', level: 10 };
 
 export type TileKey =
   | 'grass' | 'flower' | 'path' | 'tall' | 'tree' | 'water' | 'fence' | 'rock'

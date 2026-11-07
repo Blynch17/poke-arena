@@ -51,6 +51,21 @@ Los ataques también tienen la **precisión** de los juegos: los de 100 % salen 
 El rival ahora apunta con adelanto, esquiva proyectiles y ataques de área, usa los ataques de estado cuando sirven y, en
 las batallas de equipos, cambia de Pokémon cuando le conviene (también explicado en ese documento).
 
+### Ataques que bajan stats, curan y Teletransporte
+- **Bajar stats del rival** (Gruñido, Malicioso, Agitacola, Chirrido, Ataque Arena, Pantalla de Humo...): son proyectiles que
+  hay que acertar (el rival puede esquivarlos); si conectan bajan 1 o 2 etapas, de -6 a 6, como en los juegos. La
+  **precisión** también es una etapa: cada una baja la precisión de todos sus ataques (x3/4, x3/5...) y hace que se desvíen.
+  Algunos ataques de daño tienen una probabilidad de bajar un stat (Psíquico 10 % de Def. Esp., Bola Sombra 20 %...).
+- **Curar:** Recuperación, Ovocuración, Relajo, Respiro, Fotosíntesis y Luz Lunar devuelven la mitad de los PS máximos;
+  **Descanso** los devuelve todos, quita los estados y deja dormido 2 turnos. Tardan 12 s en recargarse y dejan quieto
+  1 s. No se pueden usar con la vida llena. El rival los usa cuando le queda poca vida.
+- **Absorber** (Absorber, Megaagotar, Gigadrenado, Chupavidas, Come Sueños, Beso Drenaje): curan a quien ataca el daño que
+  hacen por 0,5 (50 %) × `DRAIN_SCALE` (2, en `src/data.ts`; la vida está multiplicada por 5 pero el daño no).
+- **Teletransporte** (Abra): contra un **Pokémon salvaje**, si lo usa el jugador termina la batalla; un salvaje que lo sabe
+  lo usa en cuanto le pegan y escapa (sin EXP ni captura). Contra un **entrenador** (o en la arena) se cambia por otro
+  Pokémon del equipo: el jugador elige a cuál, y el rival entrenador lo usa si no tiene ataques para hacer daño. No se puede
+  usar si no queda a quién cambiar.
+
 ## Capturar Pokémon salvajes
 
 En la pantalla de selección de equipo, **TAB** cambia entre *combate de arena* y *Pokémon salvaje*. En modo salvaje
@@ -93,6 +108,42 @@ siguiéndote. El desierto tiene camino de tierra, cardones, dunas, formaciones d
 con laguna y **matorral seco** donde aparecen Pokémon salvajes de tierra, roca y fuego (Sandshrew, Diglett, Geodude,
 Cubone, Rhyhorn, Ponyta... y, muy rara vez, Arcanine y Aerodactyl), de nivel 13 a 28. Las rutas se definen en `ROUTES`
 (`src/route.ts`): cada una tiene su mapa, su tabla de encuentros y sus salidas (`exits`).
+
+## Experiencia y niveles (aventura)
+
+En la aventura cada Pokémon del equipo **empieza en nivel 8** (`START_LEVEL` en `src/exp.ts`) y sube ganando EXP; en la
+arena y en el modo salvaje suelto todos siguen a nivel 50. Los números están en `src/exp.ts`:
+
+- **Curva:** EXP total = nivel³ (la curva «rápida-media» de los juegos), hasta el nivel 100.
+- **EXP por derrotado:** la fórmula de la generación 5: `(a·b·Lf / 5s) · ((2Lf+10)/(Lf+Lp+10))^2,5 + 1`. `a` vale 1,5
+  contra entrenadores; `b` es la EXP base de la especie (estimada con sus stats base); `Lf` y `Lp` son el nivel del
+  derrotado y del que recibe; `s`, los que participaron y siguen en pie.
+- **Reparto:** solo ganan EXP los Pokémon que **pelearon contra ese rival y siguen con PS**; los que no salieron a la
+  arena, o están debilitados, no reciben nada. Capturar un Pokémon también da EXP.
+- **Al subir de nivel** se recalculan stats y PS máximos; los PS nuevos se suman a los que tenía (como en los juegos). Al
+  terminar la batalla se ve cuánta EXP ganó cada uno y cómo cambiaron sus stats.
+- **Si pierdes** vuelves a la entrada y el equipo se cura, pero **conserva nivel y EXP**. Salir al menú de equipos reinicia
+  todo (no hay partida guardada todavía).
+- El rival Anselmo pelea a nivel 10 (`RIVAL.level` en `src/route.ts`); la barra de EXP está en «Datos» del menú Pokémon.
+- **Ataques por nivel y evoluciones:** ver la sección siguiente.
+
+### Ataques que se aprenden y evoluciones (aventura)
+Cada especie tiene definido qué ataque aprende en cada nivel y a qué nivel evoluciona (`src/learnsets.ts`, generado con
+`tools/gen_learnsets.py` desde PokeAPI: las listas de Ultra Sol / Ultra Luna).
+
+- En la aventura un Pokémon sale con los últimos hasta **4 ataques** que le tocan a su nivel (no con los 4 fijos de la arena).
+  Los rivales y los salvajes también.
+- Al subir de nivel, después de la batalla, aprende los ataques de esos niveles. Si ya tiene 4, el juego pregunta cuál
+  **olvida** o si **no aprende** el nuevo (↑ ↓ y ENTER). Los PP del ataque nuevo salen completos.
+- Al llegar a su nivel de evolución evoluciona (cambian especie, stats y PS máximos; conserva nivel, EXP y ataques). Si
+  puede evolucionar en varias especies (Eevee) se elige. Las evoluciones que en los juegos son por piedra, intercambio o
+  felicidad tienen un nivel asignado en `EVO_FALLBACK` (editable en `learnsets.ts`: piedra 30, intercambio 40, felicidad 32).
+- Los niveles de evolución y de aprendizaje están en `src/learnsets.ts`; los ataques que no existían en el catálogo
+  (172 de daño, 7 de mejora, 3 de estado) están en `src/moves_gen.ts` y se calculan con la misma escala de poder/costo.
+- **Siguen sin existir** los ataques de campo y los que dependen de turnos (Protección, Reflejo, Clima, Trampas, Danza Lluvia,
+  Sustituto, Maldición, Antojo...): se omiten de las listas. Algunas especies empiezan con 1 o 2 ataques.
+- Para sumar generaciones nuevas: agrega las especies a `SPECIES` y corre `python3 tools/gen_learnsets.py 1 493`
+  (o el rango que toque).
 
 ## Desarrollo
 

@@ -2,7 +2,7 @@
 // nivel y PS, y el panel de "datos" con sus ataques y los PP que le quedan a cada uno.
 
 import Phaser from 'phaser';
-import { PokemonDef, Stats, TYPE_COLOR, maxUses } from './data';
+import { PokemonDef, Stats, TYPE_COLOR, maxUses, Move, Debuff, STAT_NAME } from './data';
 import { STATUS_INFO } from './status';
 
 export interface Entry {
@@ -13,6 +13,7 @@ export interface Entry {
   stats: Stats;
   pp: number[];       // usos que le quedan a cada ataque
   tag?: string;       // texto extra a la derecha (por ejemplo "en combate")
+  exp?: { cur: number; from: number; to: number };   // EXP total, la del nivel actual y la del siguiente (solo en la aventura)
 }
 
 type Obj = Phaser.GameObjects.GameObject;
@@ -59,6 +60,23 @@ export function teamCards(
   return out;
 }
 
+const debuffText = (d: Debuff) => (Object.keys(d) as (keyof Debuff)[]).filter((k) => d[k]).map((k) => `${k === 'acc' ? 'Precisión' : STAT_NAME[k]} ${Math.abs(d[k]!) >= 2 ? '▼▼' : '▼'}`).join(', ');
+
+/** Línea con lo que hace un ataque además del daño (estado que causa, stats que baja, cura, absorbe...). */
+export function effectLine(mv: Move): string {
+  const parts: string[] = [];
+  if (mv.inflict) {
+    const w = mv.inflict.status, name = w === 'flinch' ? 'retroceso' : w === 'tri' ? 'quemar, paralizar o congelar' : STATUS_INFO[w].name.toLowerCase();
+    parts.push(mv.category === 'status' ? `Causa: ${name}` : `${mv.inflict.chance} % de causar ${name}`);
+  }
+  if (mv.debuff) parts.push(`Baja al rival: ${debuffText(mv.debuff)}`);
+  if (mv.drop) parts.push(`${mv.drop.chance} % de bajar: ${debuffText(mv.drop.stages)}`);
+  if (mv.drain) parts.push('Cura con el daño que hace');
+  if (mv.heal) parts.push(mv.rest ? 'Cura todo y duerme 2 turnos' : `Cura ${Math.round(mv.heal * 100)} % de los PS`);
+  if (mv.teleport) parts.push('Salvaje: termina la batalla · Entrenador: cambia de Pokémon');
+  return parts.join(' · ');
+}
+
 /** Panel de datos de un Pokémon: imagen, nivel, PS, tipos, stats y ataques con los PP que le quedan. */
 export function dataPanel(scene: Phaser.Scene, e: Entry, cx: number, cy: number): Obj[] {
   const w = 760, h = 470, left = cx - w / 2, top = cy - h / 2, out: Obj[] = [];
@@ -77,8 +95,14 @@ export function dataPanel(scene: Phaser.Scene, e: Entry, cx: number, cy: number)
   out.push(scene.add.rectangle(left + 120, top + 304, 204, 18, 0x000000, 0.65));
   out.push(scene.add.rectangle(left + 20, top + 296, Math.max(0.01, 200 * f), 14, hpColor(f)).setOrigin(0, 0));
   out.push(scene.add.text(left + 120, top + 326, `PS ${Math.ceil(e.hp)}/${e.maxHp}`, { fontSize: '16px', color: '#fff' }).setOrigin(0.5));
+  if (e.exp) {   // barra de experiencia hacia el siguiente nivel
+    const span = Math.max(1, e.exp.to - e.exp.from), f2 = Phaser.Math.Clamp((e.exp.cur - e.exp.from) / span, 0, 1);
+    out.push(scene.add.rectangle(left + 120, top + 352, 204, 10, 0x000000, 0.65));
+    out.push(scene.add.rectangle(left + 20, top + 347, Math.max(0.01, 200 * f2), 6, 0x4aa8ff).setOrigin(0, 0));
+    out.push(scene.add.text(left + 120, top + 364, `EXP ${e.exp.cur}  ·  faltan ${Math.max(0, e.exp.to - e.exp.cur)}`, { fontSize: '12px', color: '#9fb8a6' }).setOrigin(0.5, 0));
+  }
   const st = e.stats;
-  out.push(scene.add.text(left + 120, top + 372, `Ataque ${st.atk}   Defensa ${st.def}\nAt. Esp. ${st.spa}   Def. Esp. ${st.spd}\nVelocidad ${st.spe}`, { fontSize: '14px', color: '#9fb8a6', align: 'center', lineSpacing: 4 }).setOrigin(0.5, 0));
+  out.push(scene.add.text(left + 120, top + 384, `Ataque ${st.atk}   Defensa ${st.def}\nAt. Esp. ${st.spa}   Def. Esp. ${st.spd}\nVelocidad ${st.spe}`, { fontSize: '14px', color: '#9fb8a6', align: 'center', lineSpacing: 4 }).setOrigin(0.5, 0));
   // derecha: ataques
   out.push(scene.add.text(left + 270, top + 62, 'ATAQUES', { fontSize: '16px', color: '#ffd23f', fontStyle: 'bold' }));
   e.def.moves.forEach((mv, i) => {
@@ -90,10 +114,8 @@ export function dataPanel(scene: Phaser.Scene, e: Entry, cx: number, cy: number)
     out.push(scene.add.text(x + mw - 12, y + 8, `PP ${left_}/${max}`, { fontSize: '20px', color: left_ <= 0 ? '#ff8888' : '#cfe8cf', fontStyle: 'bold' }).setOrigin(1, 0));
     const kind = mv.category === 'status' ? 'Estado' : mv.category === 'physical' ? 'Física' : 'Especial';
     out.push(scene.add.text(x + 22, y + 40, `${mv.type} · ${kind}${mv.power ? ` · Potencia ${mv.power}` : ''} · Prec. ${mv.accuracy ?? 100} % · Energía ${mv.cost}`, { fontSize: '14px', color: '#9fb8a6' }));
-    if (mv.inflict) {   // estado que puede causar
-      const w = mv.inflict.status, name = w === 'flinch' ? 'retroceso' : w === 'tri' ? 'quemar, paralizar o congelar' : STATUS_INFO[w].name.toLowerCase();
-      out.push(scene.add.text(x + 22, y + 58, mv.category === 'status' ? `Causa: ${name}` : `${mv.inflict.chance} % de causar ${name}`, { fontSize: '12px', color: '#ffd23f' }));
-    }
+    const fx = effectLine(mv);
+    if (fx) out.push(scene.add.text(x + 22, y + 58, fx, { fontSize: '12px', color: '#ffd23f' }));
   });
   out.push(scene.add.text(cx, top + h - 20, 'ENTER o ESC para volver', { fontSize: '14px', color: '#cfe8cf' }).setOrigin(0.5));
   return out;

@@ -1,4 +1,4 @@
-import { MOVES, BOOSTS, SPECIES, STATUS_MOVES, INFLICT, ACCURACY } from './roster';
+import { MOVES, BOOSTS, SPECIES, STATUS_MOVES, INFLICT, ACCURACY, DEBUFFS, HEALS, DRAIN, DROPS } from './roster';
 import type { Inflict, StatusId } from './status';
 
 export type PType =
@@ -9,6 +9,8 @@ export type PType =
 export type Category = 'physical' | 'special' | 'status';
 export type StatKey = 'atk' | 'def' | 'spa' | 'spd' | 'spe';
 export type Stages = Record<StatKey, number>;
+/** Bajada de stats del rival: etapas por stat (valores negativos) y `acc` = etapas de precisión. */
+export type Debuff = Partial<Stages> & { acc?: number };
 
 export interface Move {
   name: string;
@@ -44,6 +46,13 @@ export interface Move {
   recoil?: boolean;   // el usuario pierde 1/4 de sus PS máximos al golpear
   inflict?: Inflict;  // estado que puede causar al rival (en un ataque de estado, siempre que conecte)
   accuracy?: number;  // precisión en %, como en los juegos (sin dato = 100: sale siempre donde se apunta)
+  key?: string;       // clave en el catálogo (roster.ts): solo la tienen los ataques que se aprenden por nivel
+  debuff?: Debuff;    // ataque de estado que baja stats del rival si el proyectil conecta (Gruñido, Malicioso...)
+  drop?: { stages: Debuff; chance: number }; // ataque de daño que a veces baja stats del rival (Psíquico: Def. Esp.)
+  drain?: number;     // fracción del daño que cura a quien ataca (Gigadrenado 0,5)
+  heal?: number;      // ataque de estado que cura esta fracción de los PS máximos de quien lo usa (Recuperación 0,5)
+  rest?: boolean;     // Descanso: cura todo, quita los estados y deja dormido 2 turnos
+  teleport?: boolean; // Teletransporte: contra un salvaje termina la batalla; contra un entrenador cambia de Pokémon
 }
 
 export interface BaseStats {
@@ -79,6 +88,12 @@ export const PP_DOUBLE = 2;
 export const STAGE_MAX = 6;
 export const STATUS_COST = 50;            // energía de los ataques de mejora
 export const STATUS_COOLDOWN = 8000;      // ms de recarga
+export const HEAL_COST = 30;              // energía de los ataques que curan
+export const HEAL_COOLDOWN = 12000;       // ms de recarga: sanarse del todo cada pocos segundos haría eternos los combates
+export const HEAL_LOCK = 1000;            // ms inmóvil mientras se cura
+/** La vida está multiplicada por HP_MULT pero el daño no, así que lo que se cura al absorber se escala igual: 0,5 de
+ *  daño absorbido cura más o menos el daño hecho (si no, absorber casi no se notaría). */
+export const DRAIN_SCALE = 2;
 export const STATUS_LOCK_PER_STAGE = 2000; // ms inmóvil por etapa subida
 // Cuánto de la etapa de Velocidad se nota al caminar (0 = nada, 1 = el multiplicador completo del juego).
 export const SPEED_STAGE_EFFECT = 0.3;
@@ -191,6 +206,17 @@ const st = (name: string, type: PType, pp: number, cost: number, boost: Partial<
 const sm = (name: string, type: PType, pp: number, fx: string, status: StatusId): Move => ({
   name, type, category: 'status', power: 0, pp, cost: 24, cooldown: 1800, speed: 430, life: 1000, size: 1, fx,
   inflict: { status, chance: 100 },
+});
+
+// Ataque de estado que baja stats del rival: se lanza como proyectil y, si conecta, las baja (sin daño).
+const db = (name: string, type: PType, pp: number, fx: string, debuff: Debuff): Move => ({
+  name, type, category: 'status', power: 0, pp, cost: 20, cooldown: 1500, speed: 520, life: 900, size: 1, fx, boost: {}, debuff,
+});
+
+// Ataque de estado que cura a quien lo usa una fracción de sus PS máximos.
+const hl = (name: string, type: PType, pp: number, frac: number): Move => ({
+  name, type, category: 'status', power: 0, pp, cost: HEAL_COST, cooldown: HEAL_COOLDOWN, speed: 0, life: 0, size: 0, boost: {},
+  heal: frac, lock: HEAL_LOCK,
 });
 
 // Cuando se acaban los PP de todos los ataques, el juego obliga a usar Forcejeo.
@@ -319,8 +345,16 @@ const RAW: Raw[] = [
 function fromCatalog(key: string): Move {
   const status = STATUS_MOVES[key];
   if (status) return sm(status[0], status[1], status[2], status[3], status[4]);
+  const debuff = DEBUFFS[key];
+  if (debuff) return db(debuff[0], debuff[1], debuff[2], debuff[3], debuff[4]);
+  const heal = HEALS[key];
+  if (heal) return { ...hl(heal[0], heal[1], heal[2], heal[3]), ...(key === 'rest' ? { rest: true } : {}) };
   const boost = BOOSTS[key];
-  if (boost) return { ...st(boost[0], boost[1], boost[2], STATUS_COST, boost[3]), ...(key === 'transform' ? { transform: true } : {}) };
+  if (boost) return {
+    ...st(boost[0], boost[1], boost[2], STATUS_COST, boost[3]),
+    ...(key === 'transform' ? { transform: true } : {}),
+    ...(key === 'teleport' ? { teleport: true, cost: 15, cooldown: 3000 } : {}),
+  };
   const [name, type, cat, power, pp, fx, shape, extra = {}] = MOVES[key];
   const category = cat as 'physical' | 'special';
   const cost = Math.min(60, Math.max(14, Math.round(6 + power * 0.4)));
@@ -362,14 +396,31 @@ export const POKEMON: PokemonDef[] = [...RAW, ...EXTRA_RAW].map((r) => {
 }).sort((a, b) => a.dex - b.dex);
 
 // Efectos secundarios de los ataques de daño (por nombre; ver INFLICT en roster.ts).
-for (const p of POKEMON) for (const m of p.moves) {
+function applyEffects(m: Move) {
   const inf = INFLICT[m.name];
   if (inf && m.category !== 'status') m.inflict = { status: inf[0], chance: inf[1] };
   if (ACCURACY[m.name]) m.accuracy = ACCURACY[m.name];
+  if (DRAIN[m.name] && m.category !== 'status') m.drain = DRAIN[m.name];
+  const drop = DROPS[m.name];
+  if (drop && m.category !== 'status') m.drop = { stages: drop[0], chance: drop[1] };
+}
+for (const p of POKEMON) for (const m of p.moves) applyEffects(m);
+
+const MOVE_CACHE = new Map<string, Move>();
+/** Un ataque del catálogo por su clave (los de las listas de aprendizaje por nivel). */
+export function moveByKey(key: string): Move {
+  let m = MOVE_CACHE.get(key);
+  if (!m) { m = fromCatalog(key); m.key = key; applyEffects(m); MOVE_CACHE.set(key, m); }
+  return m;
 }
 
 /** Lo que conserva un Pokémon de su equipo entre batallas en la aventura: sus PS y los usos que le quedan de cada ataque. */
-export interface PartyMon { hp: number; pp: number[] }
+export interface PartyMon {
+  hp: number; pp: number[];
+  level?: number; exp?: number;   // solo en la aventura
+  moves?: string[];               // claves de los ataques que conoce (aventura); sin dato, los que le tocan por nivel
+  species?: number;               // índice en POKEMON de su especie actual, si evolucionó (la clave de Party es la especie original)
+}
 export type Party = Record<number, PartyMon>;   // por índice en POKEMON
 
 // Las curaciones también se multiplican por HP_MULT (Poción original: 20 PS).

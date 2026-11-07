@@ -90,3 +90,11 @@ Para que el Pokémon también pueda aparecer como salvaje con su dificultad real
 Proyectiles: `ember`, `water`, `ice`, `leaf`, `sludge`, `spark`, `psy`, `psychic`, `shadow`, `fairy`, `steel`, `earth`,
 `rock`, `bug`, `dark`. Chorros continuos: `hydro`, `flame`, `solar`, `dragon`, `blizzard`.
 Contacto (con `style: 'dash'`): `slam`, `wing`, `punch`, `steel`, `bug`, `dragon`.
+
+
+## Ataques por nivel y evoluciones de una especie nueva
+
+Al sumar una especie a `SPECIES` (`src/roster.ts`), corre `python3 tools/gen_learnsets.py` (o con un rango de Pokédex,
+por ejemplo `1 493`) para regenerar `src/learnsets.ts` y `src/moves_gen.ts`: así la especie aprende ataques por nivel y
+evoluciona en la aventura. Los ataques de daño nuevos salen del poder, tipo, PP y precisión de PokeAPI; los que el juego
+todavía no sabe hacer (curar, bajar stats, clima...) se omiten. Las evoluciones sin nivel en los juegos usan `EVO_FALLBACK`.
