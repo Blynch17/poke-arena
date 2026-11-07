@@ -2,9 +2,14 @@ import Phaser from 'phaser';
 import {
   POKEMON, PokemonDef, Party, Move, Stages, Stats, Fighter, StatKey, calcDamage, TYPE_COLOR, ITEMS, ItemId, ENERGY_MAX, ENERGY_REGEN,
   STRUGGLE, newStages, stageMult, maxUses, STAT_NAME, STAGE_MAX, SPEED_STAGE_EFFECT,
-  BALLS, BallId, makeCombatant, WILD_LEVEL_MIN, WILD_LEVEL_MAX,
+  BALLS, BallId, makeCombatant, WILD_LEVEL_MIN, WILD_LEVEL_MAX, HP_MULT, effectiveness,
 } from '../data';
-import { catchX, captureChance, rollCapture } from '../capture';
+import { catchX, captureChance, rollCapture, statusCatchMult } from '../capture';
+import {
+  StatusId, Inflict, STATUS_INFO, rollDuration, TURN_MS, FLINCH_MS, FAIL_BLOCK_MS, PARALYSIS_FAIL, CONFUSION_SELF, CONFUSION_SELF_POWER,
+  BURN_FRAC, POISON_FRAC, TOXIC_STEP, TOXIC_MAX_N, BURN_ATK_MULT, STATUS_GRACE_MS, AI_STATUS_COOLDOWN_MS, AI_STATUS_COOLDOWN_HIT_MS,
+} from '../status';
+import { StatusFx, StatusView } from '../statusfx';
 import { Fx, HEAD_TEXTURE, HIDE_HEAD, SPIN, STREAM_FX } from '../fx';
 import { Area, buildArea } from '../area';
 import { music } from '../music';
@@ -43,7 +48,12 @@ function walkRow(f: Phaser.Math.Vector2): number {
 }
 
 // Un combatiente en la batalla: la especie a un nivel, con sus stats y su vida máxima ya calculados.
-interface Member { def: PokemonDef; level: number; stats: Stats; maxHp: number; hp: number; energy: number; stages: Stages; pp: number[] }
+interface Member {
+  def: PokemonDef; level: number; stats: Stats; maxHp: number; hp: number; energy: number; stages: Stages; pp: number[];
+  status: StatusId | null; statusLeft: number; statusAge: number; tickIn: number; // estado principal (ms que le quedan, ms que lleva)
+  confLeft: number;                                                                // confusión (ms que le quedan)
+  graceLeft: number;                                                               // ms que resiste nuevos estados tras curarse
+}
 
 const fighter = (m: Member): Fighter => ({ types: m.def.types, stats: m.stats, level: m.level });
 
@@ -74,9 +84,11 @@ interface Side {
   leap: Leap | null;   // ataque en dos tiempos en curso
   lift: number;        // altura visual sobre el suelo (px)
   hidden: boolean;     // fuera de la vista y sin poder ser golpeado (Vuelo, Excavar)
+  flashUntil: number;  // destello rojo al recibir un golpe
+  blockUntil: number;  // no puede atacar hasta este instante (falló por parálisis o confusión)
 }
 
-interface Leap { mv: Move; att: Member; t0: number; mx: number; my: number; started: boolean }
+interface Leap { mv: Move; att: Member; t0: number; mx: number; my: number; started: boolean; off: { x: number; y: number } }
 
 interface Dash {
   vx: number; vy: number; until: number; move: Move; att: Member; ghostAt: number;
@@ -101,7 +113,7 @@ interface Shot {
 }
 
 // Ataque de área en curso (ver area.ts).
-interface ActiveArea { a: Area; owner: Side; att: Member; move: Move }
+interface ActiveArea { a: Area; owner: Side; att: Member; move: Move; off?: { x: number; y: number } }
 
 type MenuScreen = '' | 'main' | 'team' | 'teamActions' | 'data' | 'items' | 'balls' | 'settings' | 'controls';
 
@@ -129,6 +141,9 @@ export class BattleScene extends Phaser.Scene {
   private returnTo: Record<string, unknown> | null = null; // si viene del mundo, a dónde volver al terminar
 
   private fx!: Fx;
+  private statusFx!: StatusFx;
+  private pills: Phaser.GameObjects.Text[][] = [];   // etiquetas de estado junto al nombre (jugador, rival)
+  private pv = { x: 0, y: 0, vx: 0, vy: 0 };           // velocidad estimada del jugador, para que la IA le apunte con adelanto
   private hud!: Phaser.GameObjects.Graphics;
   private hudTexts!: Record<string, Phaser.GameObjects.Text>;
   private moveTexts: Phaser.GameObjects.Text[][] = [];
@@ -145,7 +160,7 @@ export class BattleScene extends Phaser.Scene {
   private ai = {
     nextFire: 1500, strafe: 1, strafeUntil: 0, aimErr: 0, aimUntil: 0,
     dodgeUntil: 0, dodge: new Phaser.Math.Vector2(), ideal: 210, closeAt: 0, hist: [] as number[], waits: 0,
-    checkAt: 0, lastX: 0, lastY: 0, unstickUntil: 0, lastAct: 0,
+    checkAt: 0, lastX: 0, lastY: 0, unstickUntil: 0, lastAct: 0, lastSwitch: 0, switchCheck: 0, statusReadyAt: 0, reads: true, readUntil: 0, notice: new Map<object, { at: number; ignore: boolean }>(),
   };
 
   constructor() {
@@ -183,12 +198,19 @@ export class BattleScene extends Phaser.Scene {
     this.ai.unstickUntil = 0;
     this.ai.lastAct = 0;
     this.ai.closeAt = 0;
+    this.ai.lastSwitch = 0;
+    this.ai.statusReadyAt = 0;
+    this.ai.reads = true;
+    this.ai.readUntil = 0;
+    this.ai.switchCheck = 0;
+    this.ai.notice.clear();
     this.input.keyboard!.addCapture('UP,DOWN,LEFT,RIGHT,ENTER,SPACE');
 
     music.play('battle');
     void sfx.preload();
     this.drawArena();
     this.fx = new Fx(this);
+    this.statusFx = new StatusFx(this);
 
     const mine = data.team.map((i) => POKEMON[i]);
     this.player = this.makeSide(true, mine, A.x + 160, A.y + A.h / 2);
@@ -205,6 +227,7 @@ export class BattleScene extends Phaser.Scene {
 
     this.hud = this.add.graphics().setDepth(50);
     this.buildHudTexts();
+    this.pv = { x: this.player.sprite.x, y: this.player.sprite.y, vx: 0, vy: 0 };
     this.refreshMoveTexts();
     // En la aventura cada Pokémon llega con los PS y PP que le quedaron; sale a pelear el primero que no esté debilitado.
     if (data.party) {
@@ -252,7 +275,7 @@ export class BattleScene extends Phaser.Scene {
   private makeSide(isPlayer: boolean, defs: PokemonDef[], x: number, y: number, levels: number[] = []): Side {
     const team: Member[] = defs.map((def, i) => {
       const c = makeCombatant(def, levels[i] ?? def.level);
-      return { def, ...c, hp: c.maxHp, energy: ENERGY_MAX, stages: newStages(), pp: def.moves.map(maxUses) };
+      return { def, ...c, hp: c.maxHp, energy: ENERGY_MAX, stages: newStages(), pp: def.moves.map(maxUses), status: null, statusLeft: 0, statusAge: 0, tickIn: 1000, confLeft: 0, graceLeft: 0 };
     });
     const facing = new Phaser.Math.Vector2(isPlayer ? 1 : -1, 0);
     const sprite = this.add.image(x, y, `${defs[0].id}-walk`, 0).setScale(SPRITE_SCALE).setDepth(10);
@@ -262,7 +285,7 @@ export class BattleScene extends Phaser.Scene {
     return {
       isPlayer, team, active: 0, sprite, shadow, arrow, facing,
       cd: [0, 0, 0, 0], invuln: 0, kb: new Phaser.Math.Vector2(), down: false, moving: false,
-      lockUntil: 0, dash: null, auraUntil: 0, aura, glow: null, charging: null, leap: null, lift: 0, hidden: false,
+      lockUntil: 0, dash: null, auraUntil: 0, aura, glow: null, charging: null, leap: null, lift: 0, hidden: false, flashUntil: 0, blockUntil: 0,
     };
   }
 
@@ -290,6 +313,7 @@ export class BattleScene extends Phaser.Scene {
       this.t += dt;
       const s = dt / 1000;
       this.fx.beginFrame();
+      this.trackPlayer(dt);
       this.playerInput(s);
       this.aiUpdate(s);
       this.updateDashes();
@@ -300,17 +324,20 @@ export class BattleScene extends Phaser.Scene {
       this.updateCharging(dt);
       this.updateLeaps(dt);
       this.updateBalls(s);
+      this.updateStatus(dt);
       this.regen(this.player, s);
       this.regen(this.enemy, s);
       if (this.enemy.down && this.enemySwapAt && this.t >= this.enemySwapAt) this.sendNextEnemy();
       this.fx.update(dt);
     }
     this.updateVisuals();
+    this.statusFx.update(!this.paused && !this.over && !this.catching ? dt : 0, this.statusViews());
     this.drawHud();
   }
 
   private move(side: Side, vx: number, vy: number, s: number) {
     if (side.dash) { vx = side.dash.vx; vy = side.dash.vy; } // la embestida manda sobre el control
+    if (this.immobile(side)) { vx = 0; vy = 0; side.dash = null; }   // dormido, congelado o paralizado: no se mueve
     side.kb.scale(Math.pow(0.04, s)); // el empujón se amortigua rápido
     side.moving = vx !== 0 || vy !== 0;
     side.sprite.x = Phaser.Math.Clamp(side.sprite.x + (vx + side.kb.x) * s, A.x + R, A.x + A.w - R);
@@ -342,8 +369,9 @@ export class BattleScene extends Phaser.Scene {
     if (p.down) return;
     const k = this.keys;
     let vx = 0, vy = 0;
-    const free = this.t >= p.lockUntil;
-    const canAim = free || !!p.charging;   // cargando un ataque se puede apuntar, pero no caminar
+    const unlocked = this.t >= p.lockUntil;
+    const free = unlocked && !this.immobile(p);                          // paralizado, dormido o congelado: no camina
+    const canAim = !this.incapable(p) && (unlocked || !!p.charging);   // cargando un ataque se puede apuntar, pero no caminar
     if (settings.controls === 'keys') {
       // WASD: se camina y se apunta hacia donde se camina.
       const dir = new Phaser.Math.Vector2(
@@ -378,7 +406,7 @@ export class BattleScene extends Phaser.Scene {
     KEY_SETS[settings.controls].forEach((key, i) => {
       if (k[key].isDown) this.tryFire(p, i);
     });
-    if (this.armed && free && !p.dash && Phaser.Input.Keyboard.JustDown(k.SPACE)) this.throwBall();
+    if (this.armed && unlocked && !p.dash && Phaser.Input.Keyboard.JustDown(k.SPACE)) this.throwBall();
   }
 
   // ---------- captura ----------
@@ -422,7 +450,7 @@ export class BattleScene extends Phaser.Scene {
   // La bola golpea al Pokémon salvaje: la fórmula decide el resultado y se anima la secuencia completa.
   private async captureSequence(b: Thrown) {
     const e = this.enemy, mem = this.cur(e);
-    const x = catchX(mem.maxHp, mem.hp, mem.def.catchRate, b.id, mem.level);
+    const x = catchX(mem.maxHp, mem.hp, mem.def.catchRate, b.id, mem.level, statusCatchMult(mem.status));
     const roll = rollCapture(x, b.id);
     this.catching = true;
     const ex = e.sprite.x, ey = e.sprite.y;
@@ -510,9 +538,44 @@ export class BattleScene extends Phaser.Scene {
 
   // ---------- ataques ----------
 
+  /**
+   * Precisión del ataque (campo `accuracy`, en %): 0 = sale justo donde se apuntó, 1 = desvío leve, 2 = desvío grande.
+   * Con probabilidad (1 - precisión) se desvía; de esas veces el 60 % es leve y el 40 % grande. Con 100 % nunca se desvía.
+   */
+  private aimRoll(mv: Move): 0 | 1 | 2 {
+    const acc = mv.accuracy ?? 100;
+    if (acc >= 100) return 0;
+    const miss = 1 - acc / 100, r = Math.random();
+    return r < miss * 0.4 ? 2 : r < miss ? 1 : 0;
+  }
+
+  /** Ángulo de desvío (rad) de un ataque apuntado: se mide en píxeles a lo ancho a la distancia del rival (leve 25-90 px, que
+   *  a veces aún pega; grande 130-250 px, que casi siempre falla), así que la precisión pesa igual de cerca que de lejos. */
+  private aimAngle(kind: 0 | 1 | 2, side: Side): number {
+    if (!kind) return 0;
+    const foe = side === this.player ? this.enemy : this.player;
+    const d = Math.max(150, Math.hypot(foe.sprite.x - side.sprite.x, foe.sprite.y - side.sprite.y));
+    const lateral = kind === 1 ? 25 + Math.random() * 65 : 130 + Math.random() * 120;
+    return (Math.random() < 0.5 ? -1 : 1) * Math.atan2(lateral, d);
+  }
+
+  private aimDeviation(mv: Move, side: Side): number { return this.aimAngle(this.aimRoll(mv), side); }
+
+  /** Para los ataques que caen en un punto (rayo, Vuelo): cuánto se corre el punto cuando falla (leve ~70-120 px, grande ~170-270 px). */
+  private missOffset(kind: 0 | 1 | 2): { x: number; y: number } {
+    if (!kind) return { x: 0, y: 0 };
+    const a = Math.random() * Math.PI * 2, d = kind === 1 ? 70 + Math.random() * 50 : 170 + Math.random() * 100;
+    return { x: Math.cos(a) * d, y: Math.sin(a) * d };
+  }
+
+  private rotate(v: Phaser.Math.Vector2, ang: number): Phaser.Math.Vector2 {
+    return ang ? v.clone().rotate(ang) : v;
+  }
+
   private tryFire(side: Side, i: number): boolean {
-    if (side.down || this.t < side.lockUntil) return false;
+    if (side.down || this.t < side.lockUntil || this.t < side.blockUntil) return false;
     const m = this.cur(side);
+    if (this.incapable(side)) return false;   // dormido o congelado: no ataca
     const struggle = m.pp.every((n) => n <= 0); // sin PP en ningún ataque: Forcejeo
     const ci = struggle ? 0 : i; // Forcejeo comparte una sola recarga
     if (this.t < side.cd[ci]) return false;
@@ -529,11 +592,28 @@ export class BattleScene extends Phaser.Scene {
       if (side.isPlayer) this.noEnergyAt = this.t;
       return false;
     }
+    // Parálisis y confusión: a veces el intento falla y se pierde un rato (en los juegos, el turno). No gasta PP ni energía.
+    if (m.status === 'paralysis' && Math.random() < PARALYSIS_FAIL) {
+      side.blockUntil = this.t + FAIL_BLOCK_MS;
+      this.floatText(side.sprite.x, side.sprite.y - 76, '¡Está paralizado! ¡No se puede mover!', '#ffe066');
+      sfx.status('paralysis', side.sprite.x);
+      return false;
+    }
+    if (m.confLeft > 0 && Math.random() < CONFUSION_SELF) {
+      side.blockUntil = this.t + FAIL_BLOCK_MS;
+      this.confusedHit(side);
+      return false;
+    }
     m.energy -= mv.cost;
     if (side === this.enemy) this.ai.lastAct = this.t;
     if (!struggle) m.pp[i]--;
     side.cd[ci] = this.t + mv.cooldown;
     if (struggle && side.isPlayer) this.floatText(side.sprite.x, side.sprite.y - 60, '¡Forcejeo!', '#ffb86b');
+    if (mv.category === 'status' && mv.inflict) {   // ataque de estado: un proyectil que causa el estado si conecta
+      sfx.cast(sfxKey(mv.fx ?? 'zap'), side.sprite.x);
+      this.fireShots(side, m, mv);
+      return true;
+    }
     if (mv.category === 'status') {
       sfx.boost(side.sprite.x);
       if (mv.transform) this.transform(side, m);
@@ -559,10 +639,10 @@ export class BattleScene extends Phaser.Scene {
     const f = side.facing;
     const fx = mv.fx ?? 'ember';
     const isStream = STREAM_FX.has(fx);
-    this.fx.muzzle(fx, side.sprite.x + f.x * 40, side.sprite.y + f.y * 40, f.x, f.y, mv.power);
+    this.fx.muzzle(fx, side.sprite.x + f.x * 40, side.sprite.y + f.y * 40, f.x, f.y, Math.max(30, mv.power));
     if (mv.lob) { this.lobShot(side, m, mv, fx); return; }
     // Abanico: varios proyectiles que se reparten el daño del ataque (con uno solo al blanco, pega menos que el ataque entero).
-    const n = mv.multi ?? 1, base = Math.atan2(f.y, f.x);
+    const n = mv.multi ?? 1, base = Math.atan2(f.y, f.x) + this.aimDeviation(mv, side);   // todo el abanico se desvía junto
     const shotMove = n > 1 ? { ...mv, power: Math.max(1, Math.round(mv.power * Math.min(0.8, 2.4 / n))) } : mv;
     for (let k = 0; k < n; k++) {
       const ang = base + (k - (n - 1) / 2) * (mv.spread ?? 0), dx = Math.cos(ang), dy = Math.sin(ang);
@@ -580,7 +660,7 @@ export class BattleScene extends Phaser.Scene {
 
   // Bomba Huevo: se lanza en arco hacia el punto donde está el rival y explota al caer, dañando en un área.
   private lobShot(side: Side, m: Member, mv: Move, fx: string) {
-    const f = side.facing, target = side === this.player ? this.enemy : this.player;
+    const f = this.rotate(side.facing, this.aimDeviation(mv, side)), target = side === this.player ? this.enemy : this.player;
     const dist = Phaser.Math.Clamp(Math.hypot(target.sprite.x - side.sprite.x, target.sprite.y - side.sprite.y), 160, 520);
     const flight = 750, x0 = side.sprite.x + f.x * 40, y0 = side.sprite.y + f.y * 40;
     const lx = Phaser.Math.Clamp(side.sprite.x + f.x * dist, A.x + 20, A.x + A.w - 20), ly = Phaser.Math.Clamp(side.sprite.y + f.y * dist, A.y + 20, A.y + A.h - 20);
@@ -622,7 +702,7 @@ export class BattleScene extends Phaser.Scene {
 
   private startLeap(side: Side, m: Member, mv: Move) {
     const cfg = LEAP[mv.leap ?? 'fly'];
-    side.leap = { mv, att: m, t0: this.t, mx: side.sprite.x, my: side.sprite.y, started: false };
+    side.leap = { mv, att: m, t0: this.t, mx: side.sprite.x, my: side.sprite.y, started: false, off: this.missOffset(this.aimRoll(mv)) };
     side.lockUntil = this.t + cfg.up + cfg.mark + cfg.dive + 300;
   }
 
@@ -652,9 +732,9 @@ export class BattleScene extends Phaser.Scene {
           this.fx.spawn(sx + (Math.random() - 0.5) * 30, sy + 10, { vx: (Math.random() - 0.5) * 60, vy: 120, life: 260, s0: 3, len: 30, rot: Math.PI / 2, colors: [0xffffff, 0xd8f6ff], a0: 0.8 });
         }
       } else if (t < markEnd) {   // escondido: se ve dónde va a caer
-        if (!side.hidden) { side.hidden = true; L.mx = Phaser.Math.Clamp(target.sprite.x, A.x + R, A.x + A.w - R); L.my = Phaser.Math.Clamp(target.sprite.y, A.y + R, A.y + A.h - R); }
+        if (!side.hidden) { side.hidden = true; L.mx = Phaser.Math.Clamp(target.sprite.x + L.off.x, A.x + R, A.x + A.w - R); L.my = Phaser.Math.Clamp(target.sprite.y + L.off.y, A.y + R, A.y + A.h - R); }
         const since = t - cfg.up;
-        if (since < cfg.track && !target.down) { L.mx = Phaser.Math.Clamp(target.sprite.x, A.x + R, A.x + A.w - R); L.my = Phaser.Math.Clamp(target.sprite.y, A.y + R, A.y + A.h - R); }
+        if (since < cfg.track && !target.down) { L.mx = Phaser.Math.Clamp(target.sprite.x + L.off.x, A.x + R, A.x + A.w - R); L.my = Phaser.Math.Clamp(target.sprite.y + L.off.y, A.y + R, A.y + A.h - R); }
         this.fx.leapMark(kind, L.mx, L.my, since / cfg.mark, since >= cfg.track);
       } else if (t < total) {      // cae en picada
         const kd = (t - markEnd) / cfg.dive;
@@ -681,9 +761,12 @@ export class BattleScene extends Phaser.Scene {
 
   // Ataque de área: se crea con su geometría y se va dibujando y comprobando cada cuadro (ver updateAreas).
   private castArea(side: Side, m: Member, mv: Move) {
-    const f = side.facing, target = side === this.player ? this.enemy : this.player;
-    const a = buildArea(mv, side.sprite.x, side.sprite.y + 6, f.x, f.y, A, { x: target.sprite.x, y: target.sprite.y + 8 });
-    this.areas.push({ a, owner: side, att: m, move: mv });
+    const kind = this.aimRoll(mv), target = side === this.player ? this.enemy : this.player;
+    const f = mv.style === 'nova' || mv.style === 'strike' ? side.facing : this.rotate(side.facing, this.aimAngle(kind, side));   // las de dirección se desvían; la onda redonda y el rayo del cielo, no
+    const off = mv.style === 'strike' ? this.missOffset(kind) : undefined;                                // el rayo del cielo cae corrido del rival
+    const a = buildArea(mv, side.sprite.x, side.sprite.y + 6, f.x, f.y, A, { x: target.sprite.x + (off?.x ?? 0), y: target.sprite.y + 8 + (off?.y ?? 0) });
+    if (mv.style === 'nova' && kind) { a.hit = true; this.floatText(side.sprite.x, side.sprite.y - 60, '¡Falló!', '#cccccc'); }   // la onda redonda no tiene a dónde desviarse: simplemente falla
+    this.areas.push({ a, owner: side, att: m, move: mv, off });
     side.lockUntil = this.t + (mv.style === 'nova' ? 300 : 380);   // un instante concentrándose
     if (mv.style === 'ground') this.cameras.main.shake(260, 0.0035);
     if (mv.fx === 'mind') this.tweens.add({ targets: this.cameras.main, zoom: 1.045, duration: 260, yoyo: true, ease: 'Sine.easeInOut' });   // la realidad se deforma
@@ -691,11 +774,11 @@ export class BattleScene extends Phaser.Scene {
 
   private updateAreas(dt: number) {
     for (let n = this.areas.length - 1; n >= 0; n--) {
-      const { a, owner, att, move } = this.areas[n];
+      const { a, owner, att, move, off } = this.areas[n];
       const target = owner === this.player ? this.enemy : this.player;
       a.lastT = a.t;
       a.t += dt;
-      if (a.kind === 'strike' && a.t < a.trackUntil && !target.down) { a.zones[0].x = target.sprite.x; a.zones[0].y = target.sprite.y + 8; }
+      if (a.kind === 'strike' && a.t < a.trackUntil && !target.down) { a.zones[0].x = Phaser.Math.Clamp(target.sprite.x + (off?.x ?? 0), A.x + 20, A.x + A.w - 20); a.zones[0].y = Phaser.Math.Clamp(target.sprite.y + 8 + (off?.y ?? 0), A.y + 20, A.y + A.h - 20); }
       this.fx.area(a, dt);
       if (!a.hit && this.canHit(target)) {
         const tx = target.sprite.x, ty = target.sprite.y;
@@ -758,7 +841,7 @@ export class BattleScene extends Phaser.Scene {
 
   // Embestida: quien ataca se lanza hacia adelante y daña a lo primero que toca.
   private startDash(side: Side, m: Member, mv: Move) {
-    const f = side.facing, speed = 950;
+    const f = this.rotate(side.facing, this.aimDeviation(mv, side)), speed = 950;
     const ms = ((mv.dash ?? 200) / speed) * 1000;
     side.dash = { vx: f.x * speed, vy: f.y * speed, until: this.t + ms, move: mv, att: m, ghostAt: 0 };
     side.glow = { fx: mv.fx ?? 'slam', power: mv.power, until: this.t + ms + 380, tint: mv.tint };
@@ -792,7 +875,7 @@ export class BattleScene extends Phaser.Scene {
   // Ataque de alcance corto (Lengüetazo): golpea al instante si el rival está al frente.
   private reachAttack(side: Side, m: Member, mv: Move) {
     const f = side.facing, reach = mv.reach ?? 150;
-    const ang = Math.atan2(f.y, f.x);
+    const ang = Math.atan2(f.y, f.x) + this.aimDeviation(mv, side);
     this.fx.tongue(side.sprite.x + f.x * 22, side.sprite.y + f.y * 22 - 6, ang, reach);
     side.glow = { fx: mv.fx ?? 'lick', power: mv.power, until: this.t + 380 };
     side.lockUntil = this.t + 340;
@@ -918,7 +1001,9 @@ export class BattleScene extends Phaser.Scene {
     owner: Side, att: Member, mv: Move, target: Side, px: number, py: number, dirx: number, diry: number, kbMul: number,
   ) {
     const mem = this.cur(target);
-    const { damage: dmg, eff, crit } = calcDamage(fighter(att), fighter(mem), mv, true, att.stages, mem.stages);
+    if (mv.category === 'status') { this.statusHit(mv, owner, target, px, py, dirx, diry); return; }
+    if (mem.status === 'freeze' && mv.type === 'fire') this.cureStatus(target, 'status');   // el fuego descongela
+    const { damage: dmg, eff, crit } = this.damageOf(att, mem, mv, true);
     mem.hp = Math.max(0, mem.hp - dmg);
 
     target.kb.add(new Phaser.Math.Vector2(dirx * 170 * kbMul, diry * 170 * kbMul));
@@ -928,8 +1013,7 @@ export class BattleScene extends Phaser.Scene {
     const strong = dmg >= target.team[target.active].maxHp * 0.1; // golpe fuerte
     if (strong || mv.power >= 100) this.cameras.main.shake(strong ? 110 : 90, strong ? 0.004 : 0.0028);
     sfx.hit(sfxKey(mv.fx ?? 'slam'), eff, crit, strong, target.sprite.x);
-    target.sprite.setTint(0xff7777);
-    this.time.delayedCall(110, () => target.sprite.clearTint());
+    target.flashUntil = this.t + 110;   // destello rojo (se pinta en updateVisuals)
 
     const tx = target.sprite.x, ty = target.sprite.y - 50;
     if (eff === 0) this.floatText(tx, ty, 'No afecta...', '#cccccc');
@@ -939,6 +1023,7 @@ export class BattleScene extends Phaser.Scene {
       notes.forEach((n, i) => this.floatText(tx, ty - 22 * (i + 1), n, n.startsWith('¡G') ? '#ff6b6b' : eff > 1 ? '#ff9d3f' : '#9fb8d8'));
     }
     if (mem.hp <= 0) this.faint(target);
+    else if (mv.inflict && eff > 0 && Math.random() * 100 < mv.inflict.chance) this.giveStatus(target, mv.inflict.status, false);
 
     if (mv.recoil && att.hp > 0) {
       const back = Math.floor(att.maxHp / 4);
@@ -948,9 +1033,175 @@ export class BattleScene extends Phaser.Scene {
     }
   }
 
+  // ---------- estados alterados ----------
+
+  /** Dormido, congelado o paralizado: no puede caminar. */
+  private immobile(s: Side): boolean {
+    const st = this.cur(s).status;
+    return st === 'sleep' || st === 'freeze' || st === 'paralysis';
+  }
+
+  /** Dormido o congelado: tampoco puede apuntar ni atacar. (El paralizado sí ataca, pero a veces falla.) */
+  private incapable(s: Side): boolean {
+    const st = this.cur(s).status;
+    return st === 'sleep' || st === 'freeze';
+  }
+
+  /** Daño de un ataque entre dos Pokémon: calcDamage más la quemadura (los ataques físicos pegan la mitad). */
+  private damageOf(att: Member, def: Member, mv: Move, random: boolean) {
+    const r = calcDamage(fighter(att), fighter(def), mv, random, att.stages, def.stages);
+    if (att.status === 'burn' && mv.category === 'physical' && r.damage > 0) r.damage = Math.max(1, Math.floor(r.damage * BURN_ATK_MULT));
+    return r;
+  }
+
+  /**
+   * Intenta causar un estado. `sure` es que viene de un ataque de estado (entonces avisa si no pudo).
+   * Devuelve true si lo logró.
+   */
+  private giveStatus(target: Side, kind: Inflict['status'], sure: boolean): boolean {
+    if (target.down) return false;
+    const m = this.cur(target), x = target.sprite.x, y = target.sprite.y - 76;
+    if (kind === 'tri') kind = (['burn', 'paralysis', 'freeze'] as const)[Math.floor(Math.random() * 3)];
+    if (kind === 'flinch') {   // retroceso: pierde el ataque que estaba haciendo
+      target.lockUntil = Math.max(target.lockUntil, this.t + FLINCH_MS);
+      target.charging = null;
+      target.dash = null;
+      this.floatText(x, y, '¡Retrocedió!', '#cfd8e8');
+      sfx.status('flinch', x);
+      return true;
+    }
+    const types = m.def.types;
+    const immune = (kind === 'burn' && types.includes('fire')) || (kind === 'freeze' && types.includes('ice')) ||
+      ((kind === 'poison' || kind === 'toxic') && (types.includes('poison') || types.includes('steel'))) ||
+      (kind === 'paralysis' && types.includes('electric'));
+    if (immune) { if (sure) this.floatText(x, y, 'No afecta...', '#cccccc'); return false; }
+    if (m.graceLeft > 0) { if (sure) this.floatText(x, y, '¡Resistió!', '#cccccc'); return false; }   // acaba de curarse: aguanta un rato
+    if (kind === 'confusion') {
+      if (m.confLeft > 0) { if (sure) this.floatText(x, y, '¡Pero ya está confuso!', '#cccccc'); return false; }
+      m.confLeft = rollDuration('confusion');
+    } else {
+      if (m.status) { if (sure) this.floatText(x, y, '¡Pero falló!', '#cccccc'); return false; }
+      m.status = kind;
+      m.statusLeft = rollDuration(kind);
+      m.statusAge = 0;
+      m.tickIn = 1000;
+      if (kind === 'sleep' || kind === 'freeze' || kind === 'paralysis') { target.dash = null; target.charging = null; }
+    }
+    const info = STATUS_INFO[kind];
+    this.floatText(x, y, info.text, '#' + info.color.toString(16).padStart(6, '0'));
+    sfx.status(kind, target.sprite.x);
+    this.fx.rise(target.sprite.x, target.sprite.y, info.color, 8);
+    this.fx.ring(target.sprite.x, target.sprite.y, info.color, 16, 80, 420, 4);
+    return true;
+  }
+
+  private cureStatus(side: Side, what: 'status' | 'confusion') {
+    const m = this.cur(side), x = side.sprite.x, y = side.sprite.y - 76;
+    if (what === 'confusion') {
+      m.confLeft = 0;
+      m.graceLeft = STATUS_GRACE_MS;
+      this.floatText(x, y, STATUS_INFO.confusion.cured, '#cfe8cf');
+      return;
+    }
+    if (!m.status) return;
+    this.floatText(x, y, STATUS_INFO[m.status].cured, '#cfe8cf');
+    if (m.status === 'freeze') this.fx.ring(x, side.sprite.y, 0xbfeaff, 20, 90, 380, 3);
+    m.status = null;
+    m.statusLeft = 0;
+    m.graceLeft = STATUS_GRACE_MS;
+  }
+
+  // Cuenta atrás de los estados y daño de la quemadura y el veneno (cada segundo, en la misma proporción que en los juegos:
+  // fracción de los PS máximos por turno dividida entre HP_MULT y repartida en los segundos que dura un turno).
+  private updateStatus(dt: number) {
+    for (const side of [this.player, this.enemy]) {
+      if (side.down) continue;
+      const m = this.cur(side);
+      if (m.graceLeft > 0) m.graceLeft -= dt;
+      if (m.confLeft > 0) {
+        m.confLeft -= dt;
+        if (m.confLeft <= 0) this.cureStatus(side, 'confusion');
+      }
+      if (!m.status) continue;
+      m.statusLeft -= dt;
+      m.statusAge += dt;
+      if (m.status === 'burn' || m.status === 'poison' || m.status === 'toxic') {
+        m.tickIn -= dt;
+        if (m.tickIn <= 0) {
+          m.tickIn += 1000;
+          const frac = m.status === 'burn' ? BURN_FRAC : m.status === 'poison' ? POISON_FRAC
+            : TOXIC_STEP * Math.min(TOXIC_MAX_N, 1 + Math.floor(m.statusAge / TURN_MS));
+          const dmg = Math.max(1, Math.round((m.maxHp * frac) / HP_MULT / (TURN_MS / 1000)));
+          m.hp = Math.max(0, m.hp - dmg);
+          const col = m.status === 'burn' ? '#ff9d6b' : '#d49aff';
+          this.floatText(side.sprite.x + (Math.random() - 0.5) * 24, side.sprite.y - 44, `-${dmg}`, col);
+          if (m.hp <= 0) { this.faint(side); continue; }
+        }
+      }
+      if (m.statusLeft <= 0) this.cureStatus(side, 'status');
+    }
+  }
+
+  // Ataque de estado que conecta: no daña, solo intenta aplicar el estado.
+  private statusHit(mv: Move, owner: Side, target: Side, px: number, py: number, dirx: number, diry: number) {
+    this.fx.impact(mv.fx ?? 'zap', px, py, Math.atan2(diry, dirx), 30);
+    const mem = this.cur(target);
+    if (mv.type === 'electric' && effectiveness('electric', mem.def.types) === 0) {   // Onda Trueno no afecta a los de tipo tierra
+      this.floatText(target.sprite.x, target.sprite.y - 76, 'No afecta...', '#cccccc');
+      return;
+    }
+    // Si el rival (IA) logró causar el estado, tarda bastante más en volver a intentarlo.
+    if (this.giveStatus(target, mv.inflict!.status, true) && owner === this.enemy) this.ai.statusReadyAt = Math.max(this.ai.statusReadyAt, this.t + AI_STATUS_COOLDOWN_HIT_MS);
+  }
+
+  // Confuso: se golpea a sí mismo con un ataque físico de 40 de poder sin tipo.
+  private confusedHit(side: Side) {
+    const m = this.cur(side);
+    const self: Move = { name: 'Confusión', type: 'normal', category: 'physical', power: CONFUSION_SELF_POWER, pp: 1, cost: 0, cooldown: 0, speed: 0, life: 0, size: 0, typeless: true };
+    const dmg = this.damageOf(m, m, self, true).damage;
+    m.hp = Math.max(0, m.hp - dmg);
+    side.flashUntil = this.t + 160;
+    this.floatText(side.sprite.x, side.sprite.y - 76, '¡Está confuso! ¡Se hirió a sí mismo!', '#ffd28a');
+    this.floatText(side.sprite.x, side.sprite.y - 44, `-${dmg}`, '#ffffff');
+    this.fx.impact('slam', side.sprite.x, side.sprite.y, 0, 40);
+    sfx.status('confusion', side.sprite.x);
+    if (m.hp <= 0) this.faint(side);
+  }
+
+  // Color del sprite según el estado (un destello rojo al recibir un golpe tiene prioridad).
+  private applyTint(side: Side) {
+    const m = this.cur(side);
+    let tint: number | undefined;
+    if (this.t < side.flashUntil) tint = 0xff7777;
+    else if (side.glow?.tint !== undefined) tint = side.glow.tint;
+    else if (m.status) tint = STATUS_INFO[m.status].tint;
+    if (tint === undefined) side.sprite.clearTint();
+    else side.sprite.setTint(tint);
+  }
+
+  private statusViews(): StatusView[] {
+    return [this.player, this.enemy].map((side, i) => {
+      const m = this.cur(side);
+      return { key: String(i), x: side.sprite.x, y: side.sprite.y, status: m.status, confused: m.confLeft > 0, visible: !side.down && !side.hidden && side.sprite.visible };
+    });
+  }
+
+  // Velocidad estimada del jugador (suavizada), para que la IA apunte hacia donde va a estar.
+  private trackPlayer(dt: number) {
+    const p = this.player.sprite, pv = this.pv;
+    if (dt <= 0) return;
+    const k = Math.min(1, dt / 140);
+    const vx = Phaser.Math.Clamp((p.x - pv.x) / (dt / 1000), -600, 600), vy = Phaser.Math.Clamp((p.y - pv.y) / (dt / 1000), -600, 600);
+    pv.vx += (vx - pv.vx) * k;
+    pv.vy += (vy - pv.vy) * k;
+    pv.x = p.x; pv.y = p.y;
+  }
+
   // ---------- debilitados / cambios ----------
 
   private faint(side: Side) {
+    const fm = this.cur(side);
+    fm.status = null; fm.statusLeft = 0; fm.confLeft = 0;   // al debilitarse se pierden los estados
     side.down = true;
     sfx.faint(side.sprite.x);
     side.dash = null;
@@ -982,7 +1233,12 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private switchTo(side: Side, idx: number) {
-    this.cur(side).stages = newStages(); // las mejoras se pierden al retirar al Pokémon
+    const old = this.cur(side);
+    old.stages = newStages(); // las mejoras se pierden al retirar al Pokémon
+    old.confLeft = 0;         // la confusión y el contador del tóxico se reinician al retirarlo; los demás estados siguen
+    old.statusAge = 0;
+    side.flashUntil = 0;
+    side.blockUntil = 0;
     side.active = idx;
     this.cur(side).stages = newStages();
     side.lockUntil = 0;
@@ -1019,17 +1275,21 @@ export class BattleScene extends Phaser.Scene {
   private aiUpdate(s: number) {
     const e = this.enemy, p = this.player, ai = this.ai;
     if (e.down) return;
-    const locked = this.t < e.lockUntil; // concentrándose tras un ataque de mejora
+    const busy = this.t < e.lockUntil;                  // concentrándose tras un ataque de mejora
+    const incap = this.incapable(e);                    // dormido o congelado: ni se mueve ni ataca
+    const locked = busy || this.immobile(e);            // sin poder caminar (el paralizado sí puede apuntar y atacar)
     const dx = p.sprite.x - e.sprite.x, dy = p.sprite.y - e.sprite.y;
     const dist = Math.hypot(dx, dy) || 1;
     const nx = dx / dist, ny = dy / dist;
 
     if (this.t > ai.aimUntil) {
-      ai.aimErr = (Math.random() - 0.5) * 0.3;
+      ai.aimErr = (Math.random() - 0.5) * 0.18;
       ai.aimUntil = this.t + 500 + Math.random() * 500;
     }
-    const ang = Math.atan2(dy, dx) + ai.aimErr;
-    if (!locked || e.charging) e.facing.set(Math.cos(ang), Math.sin(ang));
+    // Apunta adelantándose: hacia donde va a estar el rival cuando llegue el proyectil (a corta distancia, de frente).
+    const lead = dist > 240 ? Phaser.Math.Clamp(dist / 520, 0, 0.7) * 0.9 : 0;
+    const ang = Math.atan2(dy + this.pv.vy * lead, dx + this.pv.vx * lead) + ai.aimErr;
+    if (!incap && (!busy || e.charging)) e.facing.set(Math.cos(ang), Math.sin(ang));
 
     if (this.t > ai.strafeUntil) {
       ai.strafe = Math.random() < 0.5 ? 1 : -1;
@@ -1041,6 +1301,8 @@ export class BattleScene extends Phaser.Scene {
       (best, mv, i) => (mv.style && memE.pp[i] > 0 && this.t >= e.cd[i] - 800 ? Math.min(best, this.rangeOf(mv)) : best), 1e9);
     let ideal = meleeR < 1e9 ? Math.min(ai.ideal, meleeR * 0.7) : ai.ideal;
     let margin = meleeR < 1e9 ? 20 : 35;
+    // Rival dormido, congelado o paralizado: no puede esquivar ni alejarse, así que se acerca a pegarle de cerca.
+    if (this.immobile(p)) { ideal = Math.min(ideal, 150); margin = 10; }
     // Presión: si lleva un rato sin estar cerca del rival (porque este se queda lejos o quieto), la distancia que
     // le gusta mantener se va acortando, hasta ir a buscarlo. Al llegar a su alcance vuelve a pelear con normalidad.
     if (dist < 190) ai.closeAt = this.t;
@@ -1079,23 +1341,10 @@ export class BattleScene extends Phaser.Scene {
     mx += -ny * ai.strafe * 0.8;
     my += nx * ai.strafe * 0.8;
 
-    // esquivar proyectiles que vienen hacia el rival
-    if (this.t < ai.dodgeUntil) {
-      mx += ai.dodge.x * 2.4; my += ai.dodge.y * 2.4;
-    } else {
-      for (const sh of this.shots) {
-        if (sh.owner !== p) continue;
-        const rx = e.sprite.x - sh.img.x, ry = e.sprite.y - sh.img.y;
-        const d = Math.hypot(rx, ry);
-        const sp = Math.hypot(sh.vx, sh.vy);
-        if (d < 280 && (sh.vx * rx + sh.vy * ry) / (sp * d) > 0.92 && Math.random() < 0.05) {
-          const side = Math.random() < 0.5 ? 1 : -1;
-          ai.dodge.set((-sh.vy / sp) * side, (sh.vx / sp) * side);
-          ai.dodgeUntil = this.t + 350;
-          break;
-        }
-      }
-    }
+    // esquivar lo que viene hacia el rival: proyectiles, chorros, ataques de área, caídas y embestidas
+    const threat = this.aiThreat();
+    mx += threat.x * 3.2;
+    my += threat.y * 3.2;
     mx += wx;
     my += wy;
 
@@ -1117,7 +1366,138 @@ export class BattleScene extends Phaser.Scene {
     const go = len && !locked;
     this.move(e, go ? (mx / len) * sp : 0, go ? (my / len) * sp : 0, s);
 
-    if (this.t >= ai.nextFire && !locked) this.aiAttack(dist);
+    if (this.t >= ai.nextFire && !busy && !incap) this.aiAttack(dist);
+    if (this.t >= ai.switchCheck) { ai.switchCheck = this.t + 1000; this.aiConsiderSwitch(); }
+  }
+
+  // Peligros que vienen hacia el rival: devuelve hacia dónde apartarse (largo hasta 1; 0 si no hay peligro). Tarda un
+  // instante en reaccionar a cada proyectil y a veces ni lo ve, para que no esquive perfecto.
+  private aiThreat(): Phaser.Math.Vector2 {
+    const e = this.enemy, p = this.player, ai = this.ai, out = new Phaser.Math.Vector2();
+    const ex = e.sprite.x, ey = e.sprite.y;
+    const flee = (fx: number, fy: number, w: number) => {   // se aparta de ese punto
+      const dx = ex - fx, dy = ey - fy, d = Math.hypot(dx, dy) || 1;
+      out.x += (dx / d) * w; out.y += (dy / d) * w;
+    };
+    const roomAt = (x: number, y: number) => x > A.x + 60 && x < A.x + A.w - 60 && y > A.y + 60 && y < A.y + A.h - 60;
+    const sidestep = (ox: number, oy: number, ux: number, uy: number, w: number) => {   // se aparta de la recta (ox,oy)+t(ux,uy), hacia su lado
+      const perp = -(ex - ox) * uy + (ey - oy) * ux;
+      let sgn = perp >= 0 ? 1 : -1;
+      if (!roomAt(ex - uy * sgn * 130, ey + ux * sgn * 130) && roomAt(ex + uy * sgn * 130, ey - ux * sgn * 130)) sgn = -sgn;   // si por ahí choca con la pared, va por el otro lado
+      out.x += -uy * sgn * w; out.y += ux * sgn * w;
+    };
+    for (const sh of this.shots) {
+      if (sh.owner !== p) continue;
+      let note = ai.notice.get(sh);
+      if (!note) { note = { at: this.t + 90 + Math.random() * 170, ignore: Math.random() < 0.12 }; ai.notice.set(sh, note); }
+      if (note.ignore || this.t < note.at) continue;
+      if (sh.stream) {   // chorro: una recta desde quien lo lanzó
+        if (sh.stream.state !== 'fly') continue;
+        const ox = p.sprite.x, oy = p.sprite.y, along = (ex - ox) * sh.stream.dx + (ey - oy) * sh.stream.dy;
+        const perp = Math.abs(-(ex - ox) * sh.stream.dy + (ey - oy) * sh.stream.dx);
+        if (along > 0 && perp < R + 40 + 14 * sh.move.size) sidestep(ox, oy, sh.stream.dx, sh.stream.dy, 1);
+        continue;
+      }
+      if (sh.lob) {   // en arco: se aparta de donde va a caer
+        if (Math.hypot(ex - sh.lob.lx, ey - sh.lob.ly) < (sh.move.lob ?? 85) + R + 30) flee(sh.lob.lx, sh.lob.ly, 1.2);
+        continue;
+      }
+      const sp = Math.hypot(sh.vx, sh.vy) || 1;
+      const rx = ex - sh.img.x, ry = ey - sh.img.y;
+      const tt = (rx * sh.vx + ry * sh.vy) / (sp * sp);   // segundos hasta el punto de mayor acercamiento
+      if (tt < 0 || tt > 0.8) continue;
+      const mx = rx - sh.vx * tt, my = ry - sh.vy * tt, miss = Math.hypot(mx, my);
+      if (miss > R + 16 + 14 * sh.img.scaleX + 25) continue;
+      const w = 1 - (tt / 0.8) * 0.5;
+      if (miss < 3) sidestep(sh.img.x, sh.img.y, sh.vx / sp, sh.vy / sp, w);
+      else { out.x += (mx / miss) * w; out.y += (my / miss) * w; }
+    }
+    // Lee la puntería del rival: si apunta hacia aquí y puede disparar, se sale de su línea de tiro antes de que dispare
+    // (no siempre: presta atención ~70 % del tiempo).
+    if (this.t > ai.readUntil) { ai.reads = Math.random() < 0.7; ai.readUntil = this.t + 700; }
+    const pm = this.cur(p);
+    if (ai.reads && !this.incapable(p) && pm.energy >= 20 && p.cd.some((c) => this.t >= c - 200)) {
+      const f = p.facing, rx = ex - p.sprite.x, ry = ey - p.sprite.y;
+      const along = rx * f.x + ry * f.y, perp = Math.abs(-rx * f.y + ry * f.x);
+      if (along > 80 && along < 650 && perp < R + 36) sidestep(p.sprite.x, p.sprite.y, f.x, f.y, 0.9);
+    }
+    if (ai.notice.size > 80) for (const k of [...ai.notice.keys()]) if (!this.shots.includes(k as Shot)) ai.notice.delete(k);
+    for (const { a, owner } of this.areas) {   // ataques de área
+      if (owner !== p || a.hit) continue;
+      const rx = ex - a.ox, ry = ey - a.oy;
+      if (a.kind === 'nova') {
+        const d = Math.hypot(rx, ry), dur = (a.range / a.speed) * 1000, prog = Math.min(1, a.t / dur), front = a.range * (1 - (1 - prog) * (1 - prog));
+        if (a.t < dur + 80 && d > front - (R + 28) && d < a.range + R + 30) flee(a.ox, a.oy, 1.1);
+      } else if (a.kind === 'wave') {
+        const front = Math.min(a.range, (a.speed * a.t) / 1000), along = rx * a.dx + ry * a.dy, perp = -rx * a.dy + ry * a.dx;
+        if (along > front - 60 && along < a.range + 60 && Math.abs(perp) < 210 + 50 * (front / a.range)) {
+          const sgn = perp >= 0 ? 1 : -1;
+          out.x += -a.dy * sgn * 1.3; out.y += a.dx * sgn * 1.3;
+        }
+      } else if (a.kind === 'storm') {
+        const front = Math.min(a.range, (a.speed * a.t) / 1000), r = 60 + 40 * (front / a.range);
+        const cx = a.ox + a.dx * front, cy = a.oy + a.dy * front;
+        if (Math.hypot(ex - cx, ey - cy) < r + R + 50) flee(cx, cy, 1.2);
+      } else {
+        for (const z of a.zones) if (a.t <= z.t1 && z.t0 - a.t < 900 && Math.hypot(ex - z.x, ey - z.y) < z.r + R + 45) flee(z.x, z.y, 1.2);
+      }
+    }
+    if (p.leap && p.hidden) {   // Vuelo, Bote o Excavar del rival: se aparta de la marca de caída
+      const cfg = LEAP[p.leap.mv.leap ?? 'fly'];
+      if (Math.hypot(ex - p.leap.mx, ey - p.leap.my) < cfg.r + R + 50) flee(p.leap.mx, p.leap.my, 1.3);
+    }
+    if (p.dash) {   // embestida que viene de frente: un paso al costado
+      const dx = ex - p.sprite.x, dy = ey - p.sprite.y, d = Math.hypot(dx, dy) || 1, sp = Math.hypot(p.dash.vx, p.dash.vy) || 1;
+      if (d < 360 && (dx * p.dash.vx + dy * p.dash.vy) / (d * sp) > 0.8) sidestep(p.sprite.x, p.sprite.y, p.dash.vx / sp, p.dash.vy / sp, 1);
+    }
+    const len = out.length();
+    if (len > 1) out.scale(1 / len);
+    return out;
+  }
+
+  // Qué tan bien le va a `a` contra `b`: la fracción de los PS de b que le saca con su mejor ataque, menos la fracción de
+  // los suyos que b le saca con el suyo. Positivo = le conviene pelear contra él.
+  private aiMatchup(a: Member, b: Member): number {
+    const best = (x: Member, y: Member) => Math.min(1.5, Math.max(0, ...x.def.moves.map((mv, i) =>
+      mv.category === 'status' || x.pp[i] <= 0 ? 0 : this.damageOf(x, y, mv, false).damage)) / Math.max(1, y.hp));
+    return best(a, b) - best(b, a);
+  }
+
+  // De vez en cuando evalúa cambiar de Pokémon (solo contra entrenadores y con enfriamiento): si el actual está
+  // atrapado dormido o congelado, casi sin vida o en una mala pelea de tipos, entra un compañero que le convenga más.
+  private aiConsiderSwitch() {
+    const e = this.enemy, ai = this.ai;
+    if (this.wild || e.down || this.enemySwapAt || this.over || this.t < ai.lastSwitch + 9000 || this.t < e.lockUntil || e.leap || e.charging || e.dash) return;
+    if (Math.random() < 0.4) return;
+    const cur = this.cur(e), foe = this.cur(this.player);
+    let best = -1, bv = -9;
+    e.team.forEach((m, i) => {
+      if (i === e.active || m.hp <= 0) return;
+      const v = this.aiMatchup(m, foe) + (m.hp / m.maxHp - 0.5) * 0.3 - (m.status === 'sleep' || m.status === 'freeze' ? 0.5 : 0);
+      if (v > bv) { bv = v; best = i; }
+    });
+    if (best < 0) return;
+    const here = this.aiMatchup(cur, foe) - (cur.status === 'burn' ? 0.15 : 0);
+    const trapped = (cur.status === 'sleep' || cur.status === 'freeze') && cur.statusLeft > 3000;
+    const weak = cur.hp < cur.maxHp * 0.25 && e.team[best].hp > e.team[best].maxHp * 0.5;
+    const bad = here < -0.1 && bv - here > 0.35;
+    if (!trapped && !weak && !bad) return;
+    ai.lastSwitch = this.t;
+    this.switchTo(e, best);
+    e.invuln = this.t + 900;
+    this.toast(`El rival cambia a ${this.cur(e).def.name}`);
+  }
+
+  // ¿Vale la pena lanzarle este ataque de estado al rival?
+  private aiWorthStatus(mv: Move, foe: Member): boolean {
+    const st = mv.inflict!.status as StatusId, t = foe.def.types;
+    if (foe.graceLeft > 0) return false;   // acaba de curarse: no vale la pena
+    if (st === 'confusion') return foe.confLeft <= 0;
+    if (foe.status) return false;
+    if (st === 'paralysis' && (t.includes('electric') || (mv.type === 'electric' && effectiveness('electric', t) === 0))) return false;
+    if (st === 'burn' && (t.includes('fire') || foe.stats.atk < foe.stats.spa * 0.8)) return false;   // quemar sirve contra atacantes físicos
+    if ((st === 'poison' || st === 'toxic') && (t.includes('poison') || t.includes('steel') || foe.hp < foe.maxHp * 0.3)) return false;
+    return true;
   }
 
   // Elige el siguiente ataque del rival: varía entre los que le hacen buen daño, evita los que no
@@ -1144,15 +1524,33 @@ export class BattleScene extends Phaser.Scene {
     // Ditto se transforma lo antes posible en cuanto puede.
     const tf = moves.findIndex((mv, i) => mv.transform && ready(i));
     if (tf >= 0 && this.tryFire(e, tf)) { ai.nextFire = this.t + 1500; return; }
-    const dmg = moves.map((mv) =>
-      mv.category === 'status' || !inRange(mv) ? 0 : calcDamage(fighter(mem), fighter(foe), mv, false, mem.stages, foe.stages).damage);
+    // Ataque de estado (dormir, paralizar...): si el rival está libre de estados y le sirve, lo prueba antes que otro ataque.
+    const stIdx = moves.findIndex((mv, i) => mv.category === 'status' && mv.inflict && ready(i) && inRange(mv) && this.aiWorthStatus(mv, foe));
+    if (stIdx >= 0 && this.t >= ai.statusReadyAt && Math.random() < 0.65 && this.tryFire(e, stIdx)) {
+      ai.nextFire = this.t + 800 + Math.random() * 500;
+      ai.statusReadyAt = this.t + AI_STATUS_COOLDOWN_MS + Math.random() * 3000;   // se enfría aunque falle; si conecta, sube más (statusHit)
+      return;
+    }
+    const dmg = moves.map((mv) => (mv.category === 'status' || !inRange(mv) ? 0 : this.damageOf(mem, foe, mv, false).damage));
+    // Valor de cada ataque: el daño, ×2 si remata al rival, un poco más si puede causarle un estado, y más si el rival no
+    // puede esquivar (dormido, congelado o paralizado) y el ataque es lento de ver venir.
+    const foeStuck = this.immobile(this.player);
+    const score = dmg.map((d, i) => {
+      if (d <= 0) return 0;
+      const mv = moves[i];
+      let sc = d;
+      if (d >= foe.hp) sc *= 2;
+      if (mv.inflict && !foe.status && mv.inflict.status !== 'confusion') sc *= 1 + (mv.inflict.chance / 100) * 0.35;
+      if (foeStuck && (mv.charge || mv.style === 'strike' || mv.style === 'leap' || mv.style === 'storm' || mv.style === 'wave')) sc *= 1.6;
+      return sc * (1 + (mem.energy - mv.cost) / 250) * (0.5 + 0.5 * (mv.accuracy ?? 100) / 100);
+    });
 
     // Mejora de stats: lejos del rival, con energía de sobra y si aún tiene margen de subida.
     const boost = moves.findIndex((mv, i) =>
-      mv.category === 'status' && ready(i) && mem.energy >= mv.cost + 10 &&
+      mv.category === 'status' && !mv.inflict && ready(i) && mem.energy >= mv.cost + 10 &&
       (Object.keys(mv.boost!) as StatKey[]).some((k) => mem.stages[k] < 2));
     // Con la energía casi llena (al empezar o tras descansar) es más probable que abra con una mejora.
-    const boostChance = mem.energy >= 90 ? 0.75 : 0.4;
+    const boostChance = foeStuck ? 0.9 : mem.energy >= 90 ? 0.75 : 0.4;   // con el rival inmóvil es el momento de prepararse
     if (boost >= 0 && dist > 140 && Math.random() < boostChance && this.tryFire(e, boost)) {
       ai.nextFire = this.t + 1500;
       return;
@@ -1160,17 +1558,17 @@ export class BattleScene extends Phaser.Scene {
 
     const cand = moves.map((_, i) => i).filter((i) => dmg[i] > 0 && ready(i));
     if (!cand.length) {   // sin ataques que hagan daño (Magikarp): usa el que no hace nada, de vez en cuando
-      const idle = moves.findIndex((mv, i) => mv.category === 'status' && !mv.transform && Object.keys(mv.boost ?? {}).length === 0 && ready(i));
+      const idle = moves.findIndex((mv, i) => mv.category === 'status' && !mv.inflict && !mv.transform && Object.keys(mv.boost ?? {}).length === 0 && ready(i));
       if (idle >= 0 && this.tryFire(e, idle)) { ai.nextFire = this.t + 1200; return; }
     }
     let pick = -1;
     if (cand.length) {
-      const topC = Math.max(...cand.map((i) => dmg[i]));
-      const pool = cand.filter((i) => dmg[i] >= topC * 0.55); // solo los que valen la pena
+      const topC = Math.max(...cand.map((i) => score[i]));
+      const pool = cand.filter((i) => score[i] >= topC * 0.55); // solo los que valen la pena
       // Pesos por daño, castigando repetir el mismo ataque para que vaya variando.
       const w = pool.map((i) => {
         const [last, prev] = [ai.hist[ai.hist.length - 1], ai.hist[ai.hist.length - 2]];
-        return dmg[i] ** 2 * (i === last ? 0.3 : i === prev ? 0.7 : 1);
+        return score[i] ** 2 * (i === last ? 0.3 : i === prev ? 0.7 : 1);
       });
       let r = Math.random() * w.reduce((a, b) => a + b, 0);
       pick = pool[pool.length - 1];
@@ -1180,15 +1578,15 @@ export class BattleScene extends Phaser.Scene {
       }
     }
     // No gastar la energía en un ataque flojo si el mejor está casi listo.
-    const top = Math.max(...dmg);
-    if (pick >= 0 && dmg[pick] < top * 0.6) {
-      const j = dmg.indexOf(top);
+    const top = Math.max(...score);
+    if (pick >= 0 && score[pick] < top * 0.6) {
+      const j = score.indexOf(top);
       if (moves[j].cost - mem.energy <= 25 && e.cd[j] - this.t <= 1500 && mem.pp[j] > 0) pick = -1;
     }
     // Si iba a repetir el último ataque y hay otro igual de bueno casi listo, espera por ese.
     if (pick >= 0 && pick === ai.hist[ai.hist.length - 1] && ai.waits < 14) {
       const alt = moves.findIndex((mv, j) =>
-        j !== pick && dmg[j] >= top * 0.55 && mem.pp[j] > 0 && mv.cost - mem.energy <= 22 && e.cd[j] - this.t <= 1200);
+        j !== pick && score[j] >= top * 0.55 && mem.pp[j] > 0 && mv.cost - mem.energy <= 22 && e.cd[j] - this.t <= 1200);
       if (alt >= 0) { pick = -1; ai.waits++; }
     }
     if (pick >= 0 && this.tryFire(e, pick)) {
@@ -1211,6 +1609,7 @@ export class BattleScene extends Phaser.Scene {
     }
     for (const side of [this.player, this.enemy]) {
       if (side.down) continue;
+      if (!this.catching) this.applyTint(side);
       const f = side.facing;
       const step = side.moving ? Math.floor(this.t / 180) % 2 : 0; // alterna los 2 cuadros al caminar
       side.sprite.setTexture(`${this.cur(side).def.id}-walk`, walkRow(f) * 2 + step);
@@ -1244,6 +1643,7 @@ export class BattleScene extends Phaser.Scene {
       toast: this.add.text(480, 110, '', { fontSize: '26px', color: '#fff', stroke: '#000', strokeThickness: 5 })
         .setOrigin(0.5).setDepth(60).setAlpha(0),
     };
+    this.pills = [0, 1].map(() => [0, 1].map(() => this.add.text(0, 0, '', { fontSize: '12px', color: '#fff', fontStyle: 'bold', stroke: '#000', strokeThickness: 3 }).setOrigin(0.5).setDepth(52).setVisible(false)));
     for (let i = 0; i < 4; i++) {
       const x = 20 + i * 150;
       this.moveTexts.push([
@@ -1290,6 +1690,21 @@ export class BattleScene extends Phaser.Scene {
     const pm = this.cur(this.player), em = this.cur(this.enemy);
     this.hudTexts.pName.setText(`${pm.def.name}  Nv.${pm.level}`);
     this.hudTexts.ball.setText(this.armed ? `${BALLS[this.armed].name} lista · ESPACIO para lanzar` : '');
+    // etiquetas de estado (QUE, PAR...) junto al nombre
+    ([[this.player, this.hudTexts.pName], [this.enemy, this.hudTexts.eName]] as [Side, Phaser.GameObjects.Text][]).forEach(([side, name], i) => {
+      const m = this.cur(side), ids = [m.status, m.confLeft > 0 ? 'confusion' : null].filter(Boolean) as StatusId[];
+      const w = 40;
+      let x = side.isPlayer ? name.x + name.width + 12 : name.x - name.width - 12 - w;
+      this.pills[i].forEach((t, k) => {
+        const id = ids[k];
+        t.setVisible(!!id);
+        if (!id) return;
+        g.fillStyle(STATUS_INFO[id].color).fillRoundedRect(x, 11, w, 18, 5);
+        g.lineStyle(1.5, 0x000000, 0.6).strokeRoundedRect(x, 11, w, 18, 5);
+        t.setText(STATUS_INFO[id].abbr).setPosition(x + w / 2, 20);
+        x += side.isPlayer ? w + 4 : -(w + 4);
+      });
+    });
     this.hudTexts.pHp.setText(`${Math.ceil(pm.hp)}/${pm.maxHp}`);
     this.hudTexts.eName.setText(`${this.wild ? 'Salvaje ' : ''}${em.def.name}  Nv.${em.level}`);
     this.hudTexts.eHp.setText(`${Math.ceil(em.hp)}/${em.maxHp}`);
@@ -1389,7 +1804,7 @@ export class BattleScene extends Phaser.Scene {
       const e = this.cur(this.enemy);
       return [
         ...(Object.keys(BALLS) as BallId[]).map((id) => {
-          const pct = captureChance(catchX(e.maxHp, e.hp, e.def.catchRate, id, e.level), id) * 100;
+          const pct = captureChance(catchX(e.maxHp, e.hp, e.def.catchRate, id, e.level, statusCatchMult(e.status)), id) * 100;
           return `${BALLS[id].name} x${this.balls[id]}   ${pct < 10 ? pct.toFixed(1) : Math.round(pct)}%`;
         }),
         'Atrás',

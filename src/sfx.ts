@@ -398,6 +398,41 @@ class Sfx {
     this.tone(t + 0.28, 1568, 1568, 0.3, 'sine', 0.2);
   }
 
+
+  /** Un Pokémon recibe un estado alterado: cada uno suena distinto (chispa, burbuja, crepitar, nana, cristal, mareo). */
+  status(kind: string, x?: number) {
+    const t = this.begin(x);
+    if (t === null) return;
+    switch (kind) {
+      case 'paralysis':
+        this.noise(t, 0.18, 'highpass', 3500, 6500, 0.5);
+        [880, 1320, 660, 1100].forEach((f, i) => this.tone(t + i * 0.04, f, f * 0.6, 0.06, 'square', 0.18));
+        break;
+      case 'sleep':
+        [523, 440, 392].forEach((f, i) => this.tone(t + i * 0.2, f, f * 0.98, 0.32, 'sine', 0.2, 5));
+        break;
+      case 'poison': case 'toxic':
+        [260, 330, 220].forEach((f, i) => this.tone(t + i * 0.07, f, f * 1.8, 0.12, 'sine', 0.22));
+        this.noise(t, 0.25, 'lowpass', 900, 300, 0.25);
+        break;
+      case 'burn':
+        this.noise(t, 0.4, 'bandpass', 700, 2600, 0.55, 0.8);
+        this.tone(t, 300, 120, 0.3, 'sawtooth', 0.12);
+        break;
+      case 'freeze':
+        this.noise(t, 0.12, 'highpass', 5000, 8000, 0.4);
+        [1568, 2093, 2637].forEach((f, i) => this.tone(t + i * 0.05, f, f, 0.22, 'sine', 0.14));
+        break;
+      case 'confusion':
+        this.tone(t, 500, 900, 0.5, 'sine', 0.22, 14);
+        this.tone(t + 0.1, 900, 500, 0.5, 'triangle', 0.14, 14);
+        break;
+      default:   // retroceso
+        this.noise(t, 0.08, 'bandpass', 1800, 900, 0.5, 1.5);
+        this.tone(t, 300, 150, 0.1, 'square', 0.2);
+    }
+  }
+
   /** Un Pokémon se debilita: tono que cae. */
   faint(x?: number) {
     const t = this.begin(x);

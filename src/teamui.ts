@@ -3,6 +3,7 @@
 
 import Phaser from 'phaser';
 import { PokemonDef, Stats, TYPE_COLOR, maxUses } from './data';
+import { STATUS_INFO } from './status';
 
 export interface Entry {
   def: PokemonDef;
@@ -88,7 +89,11 @@ export function dataPanel(scene: Phaser.Scene, e: Entry, cx: number, cy: number)
     out.push(scene.add.text(x + 22, y + 8, mv.name, { fontSize: '20px', color: '#fff', fontStyle: 'bold' }));
     out.push(scene.add.text(x + mw - 12, y + 8, `PP ${left_}/${max}`, { fontSize: '20px', color: left_ <= 0 ? '#ff8888' : '#cfe8cf', fontStyle: 'bold' }).setOrigin(1, 0));
     const kind = mv.category === 'status' ? 'Estado' : mv.category === 'physical' ? 'Física' : 'Especial';
-    out.push(scene.add.text(x + 22, y + 40, `${mv.type} · ${kind}${mv.power ? ` · Potencia ${mv.power}` : ''} · Energía ${mv.cost}`, { fontSize: '14px', color: '#9fb8a6' }));
+    out.push(scene.add.text(x + 22, y + 40, `${mv.type} · ${kind}${mv.power ? ` · Potencia ${mv.power}` : ''} · Prec. ${mv.accuracy ?? 100} % · Energía ${mv.cost}`, { fontSize: '14px', color: '#9fb8a6' }));
+    if (mv.inflict) {   // estado que puede causar
+      const w = mv.inflict.status, name = w === 'flinch' ? 'retroceso' : w === 'tri' ? 'quemar, paralizar o congelar' : STATUS_INFO[w].name.toLowerCase();
+      out.push(scene.add.text(x + 22, y + 58, mv.category === 'status' ? `Causa: ${name}` : `${mv.inflict.chance} % de causar ${name}`, { fontSize: '12px', color: '#ffd23f' }));
+    }
   });
   out.push(scene.add.text(cx, top + h - 20, 'ENTER o ESC para volver', { fontSize: '14px', color: '#cfe8cf' }).setOrigin(0.5));
   return out;

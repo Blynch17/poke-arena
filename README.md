@@ -37,6 +37,20 @@ una X de cuchillas, un martillo de agua, ladrillos que saltan, etc. El listado c
 
 Para sumar más combatientes, mira [docs/AGREGAR-POKEMON.md](docs/AGREGAR-POKEMON.md).
 
+## Estados alterados y la IA del rival
+
+Hay **paralizado, dormido, envenenado, muy envenenado, quemado, congelado, confuso y retroceso**, con la duración y el daño
+de los juegos traducidos a tiempo real (1 turno = lo que tarda un Pokémon en lanzar un ataque, 2,8 s). Cada uno tiene su
+animación (rayitos, Z Z Z, burbujas moradas, llamitas, bloque de hielo, estrellas) y su color; en la barra de arriba
+aparece una etiqueta junto al nombre (PAR, DOR, ENV, TOX, QUE, CON, CNF). Los causan ataques de estado (Hipnosis, Onda
+Trueno, Tóxico, Fuego Fatuo...) y ataques de daño con la probabilidad de los juegos (Lanzallamas 10 % de quemar, Trueno 30 %
+de paralizar...). Además facilitan la captura de Pokémon salvajes. Todo el detalle está en [docs/ESTADOS.md](docs/ESTADOS.md).
+
+Los ataques también tienen la **precisión** de los juegos: los de 100 % salen siempre donde apuntas y los demás a veces se desvían un poco o mucho (detalle en el mismo documento). Tras curarse de un estado, un Pokémon resiste 7 s nuevos estados.
+
+El rival ahora apunta con adelanto, esquiva proyectiles y ataques de área, usa los ataques de estado cuando sirven y, en
+las batallas de equipos, cambia de Pokémon cuando le conviene (también explicado en ese documento).
+
 ## Capturar Pokémon salvajes
 
 En la pantalla de selección de equipo, **TAB** cambia entre *combate de arena* y *Pokémon salvaje*. En modo salvaje

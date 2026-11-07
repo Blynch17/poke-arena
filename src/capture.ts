@@ -1,6 +1,6 @@
 // Fórmula de captura de la generación actual de los juegos (Gen. VIII), según la descripción de Dragonfly Cave
 // (https://dragonflycave.com/mechanics/gen-viii-capturing). Se omiten los factores que este juego no tiene:
-// estados alterados (S = 1), el modificador de hierba (G = 1), la dificultad por medallas (D = 1) y las capturas
+// el modificador de hierba (G = 1), la dificultad por medallas (D = 1) y las capturas
 // críticas, que dependen de cuántas especies tiene registradas el jugador en la Pokédex.
 
 import { BALLS, BallId } from './data';
@@ -8,12 +8,16 @@ import { BALLS, BallId } from './data';
 /**
  * Tasa de captura modificada X:
  *   X = ((3·PSmáx − 2·PSactual) · índice de la especie · bonus de la bola / (3·PSmáx)) · L
- * donde L = (30 − nivel) / 10 si el nivel es menor a 21 (los Pokémon de nivel bajo son más fáciles) y 1 si no.
+ * donde S es el bonus por estado alterado y L = (30 − nivel) / 10 si el nivel es menor a 21 (los Pokémon de nivel bajo son más fáciles) y 1 si no.
  */
-export function catchX(maxHp: number, hp: number, speciesRate: number, ball: BallId, level: number): number {
+export function catchX(maxHp: number, hp: number, speciesRate: number, ball: BallId, level: number, status = 1): number {
   const L = level < 21 ? (30 - level) / 10 : 1;
-  return (((3 * maxHp - 2 * hp) * speciesRate * BALLS[ball].mult) / (3 * maxHp)) * L;
+  return (((3 * maxHp - 2 * hp) * speciesRate * BALLS[ball].mult * status) / (3 * maxHp)) * L;
 }
+
+/** Bonus por estado alterado: x2,5 con sueño o congelación y x1,5 con quemadura, veneno o parálisis. */
+export const statusCatchMult = (status: string | null | undefined): number =>
+  status === 'sleep' || status === 'freeze' ? 2.5 : status ? 1.5 : 1;
 
 /** Probabilidad (sobre 65536) de que pase una sacudida: Y = ⌊65536 / (255 / X)^(3/16)⌋. */
 export function shakeY(x: number): number {

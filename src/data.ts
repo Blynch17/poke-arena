@@ -1,4 +1,5 @@
-import { MOVES, BOOSTS, SPECIES } from './roster';
+import { MOVES, BOOSTS, SPECIES, STATUS_MOVES, INFLICT, ACCURACY } from './roster';
+import type { Inflict, StatusId } from './status';
 
 export type PType =
   | 'normal' | 'fire' | 'water' | 'grass' | 'electric'
@@ -41,6 +42,8 @@ export interface Move {
   reach?: number;     // px de alcance del ataque corto
   typeless?: boolean; // sin tipo: ignora STAB y efectividad (Forcejeo)
   recoil?: boolean;   // el usuario pierde 1/4 de sus PS máximos al golpear
+  inflict?: Inflict;  // estado que puede causar al rival (en un ataque de estado, siempre que conecte)
+  accuracy?: number;  // precisión en %, como en los juegos (sin dato = 100: sale siempre donde se apunta)
 }
 
 export interface BaseStats {
@@ -184,6 +187,12 @@ const st = (name: string, type: PType, pp: number, cost: number, boost: Partial<
   };
 };
 
+// Ataque de estado que causa un estado alterado: se lanza como proyectil y, si conecta, lo aplica sin hacer daño.
+const sm = (name: string, type: PType, pp: number, fx: string, status: StatusId): Move => ({
+  name, type, category: 'status', power: 0, pp, cost: 24, cooldown: 1800, speed: 430, life: 1000, size: 1, fx,
+  inflict: { status, chance: 100 },
+});
+
 // Cuando se acaban los PP de todos los ataques, el juego obliga a usar Forcejeo.
 export const STRUGGLE: Move = {
   name: 'Forcejeo', type: 'normal', category: 'physical', power: 50, pp: 1, cost: 0, cooldown: 1500,
@@ -217,7 +226,7 @@ const RAW: Raw[] = [
     id: 'venusaur', name: 'Venusaur', types: ['grass', 'poison'],
     base: { hp: 80, atk: 82, def: 83, spa: 100, spd: 100, spe: 80 },
     moves: [
-      st('Desarrollo', 'normal', 20, STATUS_COST, { atk: 1, spa: 1 }),
+      sm('Somnífero', 'grass', 15, 'cone', 'sleep'),
       mv('Hoja Afilada', 'grass', 'physical', 55, 25, 29, 1500, 800, 650, 0.8, 'razor'),
       mv('Rayo Solar', 'grass', 'special', 120, 10, 52, 3200, 700, 1000, 1.4, 'solar', { charge: 1800 }),
       mv('Bomba Lodo', 'poison', 'special', 90, 10, 42, 2500, 450, 900, 1.6, 'sludgebomb'),
@@ -228,7 +237,7 @@ const RAW: Raw[] = [
     base: { hp: 35, atk: 55, def: 40, spa: 50, spd: 50, spe: 90 },
     moves: [
       mv('Impactrueno', 'electric', 'special', 40, 30, 22, 1000, 620, 750, 0.6, 'zap'),
-      st('Agilidad', 'psychic', 30, STATUS_COST, { spe: 2 }),
+      sm('Onda Trueno', 'electric', 20, 'zap', 'paralysis'),
       mv('Rayo', 'electric', 'special', 90, 15, 42, 2400, 700, 900, 1.0, 'bolt'),
       mv('Trueno', 'electric', 'special', 110, 10, 49, 3000, 0, 0, 1, 'thunder', { style: 'strike' }),
     ],
@@ -250,7 +259,7 @@ const RAW: Raw[] = [
       mv('Lengüetazo', 'ghost', 'physical', 30, 30, 18, 900, 520, 650, 0.7, 'lick', { style: 'reach', reach: 190 }),
       mv('Bola Sombra', 'ghost', 'special', 80, 15, 38, 2200, 500, 950, 1.5, 'ghost'),
       mv('Bomba Lodo', 'poison', 'special', 90, 10, 42, 2500, 460, 900, 1.6, 'sludgebomb'),
-      st('Maquinación', 'psychic', 20, STATUS_COST, { spa: 2 }),
+      sm('Hipnosis', 'psychic', 20, 'psy', 'sleep'),
     ],
   },
   {
@@ -260,7 +269,7 @@ const RAW: Raw[] = [
       mv('Voz Cautivadora', 'fairy', 'special', 40, 15, 22, 1100, 0, 0, 1, 'notes', { style: 'nova', range: 210 }),
       mv('Golpe Cuerpo', 'normal', 'physical', 85, 15, 40, 2300, 0, 0, 1, 'slam', { style: 'dash', dash: 240, hit: 'bigimpact' }),
       mv('Fuerza Lunar', 'fairy', 'special', 95, 15, 43, 2600, 420, 1000, 1.4, 'moon'),
-      st('Paz Mental', 'psychic', 20, STATUS_COST, { spa: 1, spd: 1 }),
+      sm('Canto', 'normal', 15, 'note', 'sleep'),
     ],
   },
   {
@@ -308,6 +317,8 @@ const RAW: Raw[] = [
 // Convierte un ataque del catálogo de `roster.ts` en un `Move`. Costo, recarga y datos del proyectil salen del poder,
 // siguiendo la escala de los ataques de arriba (poder 40 = 22 de energía y ~1 s; poder 120 = ~54 y ~3,3 s).
 function fromCatalog(key: string): Move {
+  const status = STATUS_MOVES[key];
+  if (status) return sm(status[0], status[1], status[2], status[3], status[4]);
   const boost = BOOSTS[key];
   if (boost) return { ...st(boost[0], boost[1], boost[2], STATUS_COST, boost[3]), ...(key === 'transform' ? { transform: true } : {}) };
   const [name, type, cat, power, pp, fx, shape, extra = {}] = MOVES[key];
@@ -349,6 +360,13 @@ export const POKEMON: PokemonDef[] = [...RAW, ...EXTRA_RAW].map((r) => {
     maxHp: stats.hp * HP_MULT, speed: Math.round(100 + stats.spe * 1.1),
   };
 }).sort((a, b) => a.dex - b.dex);
+
+// Efectos secundarios de los ataques de daño (por nombre; ver INFLICT en roster.ts).
+for (const p of POKEMON) for (const m of p.moves) {
+  const inf = INFLICT[m.name];
+  if (inf && m.category !== 'status') m.inflict = { status: inf[0], chance: inf[1] };
+  if (ACCURACY[m.name]) m.accuracy = ACCURACY[m.name];
+}
 
 /** Lo que conserva un Pokémon de su equipo entre batallas en la aventura: sus PS y los usos que le quedan de cada ataque. */
 export interface PartyMon { hp: number; pp: number[] }
