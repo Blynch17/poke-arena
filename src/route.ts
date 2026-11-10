@@ -4,7 +4,7 @@
 export const TILE = 64; // px en pantalla de cada tile (el arte mide 32 px y se amplía x2, como el sprite del entrenador)
 
 /** El entrenador rival: espera en el borde del camino y reta a quien cruce su línea de visión. */
-export const RIVAL = { x: 12, y: 16, dir: 'left' as const, sight: 4, name: 'El huaso Anselmo', level: 10 };
+export const RIVAL = { sight: 4, name: 'El huaso Anselmo', level: 10 };   // dónde espera lo fija cada mapa (RouteMap.rival)
 
 export type TileKey =
   | 'grass' | 'flower' | 'path' | 'tall' | 'tree' | 'water' | 'fence' | 'rock'
@@ -19,6 +19,7 @@ export interface RouteMap {
   tiles: TileKey[][];
   start: { x: number; y: number };
   exits: Exit[];
+  rival?: { x: number; y: number; dir: 'up' | 'down' | 'left' | 'right' };   // dónde espera el rival (si la ruta tiene)
 }
 
 export const isWalkable = (t: TileKey) =>
@@ -39,64 +40,128 @@ function rng(seed: number) {
   };
 }
 
-export function buildRoute(): RouteMap {
-  const W = 40, H = 28, rnd = rng(20261023);
-  const tiles: TileKey[][] = Array.from({ length: H }, () => Array<TileKey>(W).fill('grass'));
-  const set = (x: number, y: number, t: TileKey) => { if (x >= 0 && y >= 0 && x < W && y < H) tiles[y][x] = t; };
-  const inEllipse = (x: number, y: number, cx: number, cy: number, rx: number, ry: number) =>
-    ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1;
+// ---------- generador de rutas abiertas ----------
+//
+// Las rutas son amplias (unos 80 × 70 tiles, varias pantallas): un camino en zigzag de lado a lado, arboledas o formaciones
+// de roca que dejan claros grandes, charcos o salares, y muchos parches de hierba alta (o matorral) donde se esconden los
+// Pokémon y de donde salen a pasear. Todo sale de una semilla fija: la ruta es siempre la misma.
 
-  // Bosque que rodea la ruta: dos tiles de grosor y un tercero salpicado.
+interface OpenCfg {
+  w: number; h: number; seed: number;
+  ground: TileKey; border: TileKey; road: TileKey; tall: TileKey; obstacle: TileKey;
+  entryX: number;                 // columna de la entrada (abajo); el camino ocupa esa columna y la siguiente
+  entryOpen?: boolean;            // la entrada se abre al borde de abajo (conexión con otra ruta)
+  exitX?: number;                 // columna de la salida de arriba (conexión con otra ruta); sin ella el camino termina dentro del mapa
+  clumps: number;                 // arboledas / formaciones de roca
+  patches: number;                // parches de hierba alta o matorral
+  lakes: { cx: number; cy: number; rx: number; ry: number; ring?: TileKey }[];   // cx, cy como fracción del mapa; rx, ry en tiles
+  decor: [TileKey, number][];     // adornos sueltos lejos del camino (probabilidades acumuladas)
+  nearDecor: [TileKey, number];   // y cerca del camino
+  fenceEntry?: boolean;
+  rival?: boolean;
+}
+
+function buildOpen(c: OpenCfg): RouteMap {
+  const W = c.w, H = c.h, rnd = rng(c.seed);
+  const tiles: TileKey[][] = Array.from({ length: H }, () => Array<TileKey>(W).fill(c.ground));
+  const set = (x: number, y: number, t: TileKey) => { if (x >= 0 && y >= 0 && x < W && y < H) tiles[y][x] = t; };
+  const inEllipse = (x: number, y: number, cx: number, cy: number, rx: number, ry: number) => ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1;
+  const between = (a: number, b: number) => a + rnd() * (b - a);
+
+  // Borde que rodea la ruta: dos tiles de grosor y un tercero salpicado.
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
     const d = Math.min(x, y, W - 1 - x, H - 1 - y);
-    if (d < 2 || (d === 2 && rnd() < 0.45)) set(x, y, 'tree');
+    if (d < 2 || (d === 2 && rnd() < 0.45)) set(x, y, c.border);
   }
 
-  // Camino de 2 tiles de ancho, en zigzag desde la entrada (abajo) hasta el fondo de la ruta.
+  // Camino de 2 tiles de ancho, en zigzag desde la entrada (abajo) hasta la salida o el fondo (arriba).
   const path: [number, number][] = [];
   const carve = (x0: number, y0: number, x1: number, y1: number) => {
     for (let x = Math.min(x0, x1); x <= Math.max(x0, x1) + (y0 === y1 ? 0 : 1); x++)
-      for (let y = Math.min(y0, y1); y <= Math.max(y0, y1) + (x0 === x1 ? 0 : 1); y++) { set(x, y, 'path'); path.push([x, y]); }
+      for (let y = Math.min(y0, y1); y <= Math.max(y0, y1) + (x0 === x1 ? 0 : 1); y++) { set(x, y, c.road); path.push([x, y]); }
   };
-  carve(19, 25, 19, 21);   // entrada
-  carve(10, 21, 19, 21);   // hacia el oeste
-  carve(10, 12, 10, 21);   // sube por el oeste
-  carve(10, 12, 27, 12);   // cruza hacia el este
-  carve(26, 4, 26, 12);    // sube hasta el fondo
+  const startY = c.entryOpen ? H - 2 : H - 3;
+  const target = c.exitX ?? Math.round(W * 0.68);
+  const pts: [number, number][] = [[c.entryX, startY]];
+  const segs = Math.max(3, Math.round((H - 8) / 16));
+  let lastX = c.entryX;
+  for (let i = 1; i <= segs; i++) {
+    const y = Math.round(startY - (i / segs) * (startY - 5));
+    let nx = target;
+    if (i < segs) do nx = 12 + Math.floor(rnd() * (W - 26)); while (Math.abs(nx - lastX) < 14);
+    pts.push([nx, y]);
+    lastX = nx;
+  }
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const [ax, ay] = pts[i], [bx, by] = pts[i + 1];
+    carve(ax, ay, ax, by);   // primero sube...
+    carve(ax, by, bx, by);   // ...y luego cruza hacia el lado
+  }
+  if (c.entryOpen) for (let y = H - 3; y < H; y++) for (const x of [c.entryX, c.entryX + 1]) set(x, y, c.road);
+  if (c.exitX !== undefined) {
+    for (let y = 0; y <= 4; y++) for (const x of [c.exitX, c.exitX + 1]) { set(x, y, c.road); path.push([x, y]); }
+    set(c.exitX - 1, 0, c.border); set(c.exitX + 2, 0, c.border);
+  }
   const distPath = (x: number, y: number) => path.reduce((m, [px, py]) => Math.min(m, Math.hypot(px - x, py - y)), 99);
 
-  // Hierba alta: parches ovalados junto al camino.
-  const patches = [[27, 19, 7, 3.6], [6, 17, 4.5, 5], [18, 8, 6.5, 3.2], [32, 24, 4, 2.6], [32, 10, 3.2, 3]];
-  const inPatch = (x: number, y: number) => patches.some(([cx, cy, rx, ry]) => inEllipse(x, y, cx, cy, rx, ry));
-  for (let y = 3; y < H - 3; y++) for (let x = 3; x < W - 3; x++)
-    if (tiles[y][x] === 'grass' && inPatch(x, y)) set(x, y, 'tall');
-
-  // Estanque en la esquina superior derecha.
-  for (let y = 3; y < H - 3; y++) for (let x = 3; x < W - 3; x++)
-    if (tiles[y][x] !== 'path' && inEllipse(x, y, 34, 6, 3.8, 2.4)) set(x, y, 'water');
-
-  // Cercos junto a la entrada.
-  for (const x of [13, 14, 15, 16, 22, 23, 24, 25]) if (tiles[24][x] === 'grass') set(x, 24, 'fence');
-
-  // Árboles, rocas y flores sueltos, sin tapar el camino ni la hierba alta.
-  for (let y = 3; y < H - 3; y++) for (let x = 3; x < W - 3; x++) {
-    if (tiles[y][x] !== 'grass') continue;
-    const r = rnd();
-    if (distPath(x, y) > 2.2 && !inPatch(x, y)) {
-      if (r < 0.1) set(x, y, 'tree');
-      else if (r < 0.14) set(x, y, 'rock');
-      else if (r < 0.26) set(x, y, 'flower');
-    } else if (r < 0.07) set(x, y, 'flower');
+  // Lagunas o salares.
+  for (const l of c.lakes) {
+    const cx = Math.round(l.cx * W), cy = Math.round(l.cy * H);
+    for (let y = 3; y < H - 3; y++) for (let x = 3; x < W - 3; x++) {
+      if (tiles[y][x] === c.road) continue;
+      if (inEllipse(x, y, cx, cy, l.rx, l.ry)) set(x, y, l.ring ? (inEllipse(x, y, cx, cy, l.rx * 0.45, l.ry * 0.45) ? 'water' : l.ring) : 'water');
+    }
   }
 
-  set(RIVAL.x, RIVAL.y, 'grass');   // el rival se para sobre pasto despejado
+  // Arboledas o formaciones de roca: dejan claros amplios entre ellas, lejos del camino.
+  for (let k = 0; k < c.clumps; k++) {
+    const cx = Math.round(between(6, W - 7)), cy = Math.round(between(6, H - 7)), rx = between(2.2, 5.5), ry = between(1.8, 4.5);
+    if (distPath(cx, cy) < Math.max(rx, ry) + 3) continue;
+    for (let y = 3; y < H - 3; y++) for (let x = 3; x < W - 3; x++)
+      if (tiles[y][x] === c.ground && inEllipse(x, y, cx, cy, rx, ry) && distPath(x, y) > 2) set(x, y, c.obstacle);
+  }
 
-  // Salida al norte, hacia el desierto: el camino del fondo sigue hasta el borde del mapa abriendo el bosque.
-  for (let y = 0; y <= 3; y++) for (const x of [26, 27]) set(x, y, 'path');
-  set(25, 0, 'tree'); set(28, 0, 'tree');
+  // Parches de hierba alta (o matorral): la mayoría junto al camino, otros en pleno claro.
+  const patch = Array.from({ length: H }, () => Array<boolean>(W).fill(false));
+  for (let k = 0; k < c.patches; k++) {
+    let cx: number, cy: number;
+    if (rnd() < 0.7) {
+      const [px, py] = path[Math.floor(rnd() * path.length)], a = rnd() * Math.PI * 2, d = between(4, 9);
+      cx = Math.round(px + Math.cos(a) * d); cy = Math.round(py + Math.sin(a) * d);
+    } else { cx = Math.round(between(6, W - 7)); cy = Math.round(between(6, H - 7)); }
+    const rx = between(2.4, 6.4), ry = between(2, 4.8);
+    for (let y = Math.max(3, Math.floor(cy - ry)); y <= Math.min(H - 4, Math.ceil(cy + ry)); y++)
+      for (let x = Math.max(3, Math.floor(cx - rx)); x <= Math.min(W - 4, Math.ceil(cx + rx)); x++)
+        if (tiles[y][x] === c.ground && inEllipse(x, y, cx, cy, rx, ry)) { set(x, y, c.tall); patch[y][x] = true; }
+  }
 
-  // Todo lo caminable debe ser alcanzable desde la entrada: lo aislado se cierra con árboles.
-  const start = { x: 19, y: 25 };
+  // Cercos junto a la entrada.
+  if (c.fenceEntry) for (let d = 3; d <= 9; d++) for (const x of [c.entryX - d, c.entryX + 1 + d]) if (tiles[H - 4][x] === c.ground) set(x, H - 4, 'fence');
+
+  // Adornos sueltos, sin tapar el camino ni la hierba alta.
+  for (let y = 3; y < H - 3; y++) for (let x = 3; x < W - 3; x++) {
+    if (tiles[y][x] !== c.ground) continue;
+    const r = rnd();
+    if (distPath(x, y) > 2.2 && !patch[y][x]) {
+      let acc = 0;
+      for (const [t, p] of c.decor) { acc += p; if (r < acc) { set(x, y, t); break; } }
+    } else if (r < c.nearDecor[1]) set(x, y, c.nearDecor[0]);
+  }
+
+  // El rival espera junto a un tramo recto del camino, mirando hacia él.
+  let rival: RouteMap['rival'];
+  if (c.rival) {
+    for (let i = Math.floor(path.length * 0.4); i < path.length && !rival; i++) {
+      const [px, py] = path[i];
+      const vertical = [-3, 3].every((d) => tiles[py + d]?.[px] === c.road);
+      if (!vertical || px + 5 >= W - 4 || tiles[py][px + 1] !== c.road) continue;
+      for (let x = px + 2; x <= px + 5; x++) set(x, py, c.ground);
+      rival = { x: px + 5, y: py, dir: 'left' };
+    }
+  }
+
+  // Todo lo caminable debe ser alcanzable desde la entrada: lo aislado se cierra.
+  const start = { x: c.entryX, y: startY };
   const seen = Array.from({ length: H }, () => Array<boolean>(W).fill(false));
   const queue: [number, number][] = [[start.x, start.y]];
   seen[start.y][start.x] = true;
@@ -109,89 +174,36 @@ export function buildRoute(): RouteMap {
       queue.push([nx, ny]);
     }
   }
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++)
-    if (isWalkable(tiles[y][x]) && !seen[y][x]) set(x, y, 'tree');
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (isWalkable(tiles[y][x]) && !seen[y][x]) set(x, y, c.obstacle);
+  return { w: W, h: H, tiles, start, exits: [], rival };
+}
 
-  const exits: Exit[] = [26, 27].map((x) => ({ x, y: 0, to: 'atacama', tx: 22 + (x - 26), ty: ATACAMA_H - 2, dir: 'up' as const }));
-  return { w: W, h: H, tiles, start, exits };
+// Tamaños y conexiones entre rutas.
+const AROMOS = { w: 80, h: 72, entryX: 28, exitX: 52 };
+const ATACAMA = { w: 88, h: 80, entryX: 40 };
+
+export function buildRoute(): RouteMap {
+  const map = buildOpen({
+    ...AROMOS, seed: 20261023, ground: 'grass', border: 'tree', road: 'path', tall: 'tall', obstacle: 'tree',
+    clumps: 34, patches: 26, fenceEntry: true, rival: true,
+    lakes: [{ cx: 0.8, cy: 0.3, rx: 6, ry: 4 }, { cx: 0.18, cy: 0.5, rx: 4.5, ry: 3.2 }],
+    decor: [['tree', 0.06], ['rock', 0.04], ['flower', 0.12]], nearDecor: ['flower', 0.07],
+  });
+  map.exits = [AROMOS.exitX, AROMOS.exitX + 1].map((x) => ({ x, y: 0, to: 'atacama', tx: ATACAMA.entryX + (x - AROMOS.exitX), ty: ATACAMA.h - 2, dir: 'up' as const }));
+  return map;
 }
 
 // ---------- Desierto de Atacama ----------
 
-const ATACAMA_W = 44;
-const ATACAMA_H = 40;
-
 export function buildAtacama(): RouteMap {
-  const W = ATACAMA_W, H = ATACAMA_H, rnd = rng(20262024);
-  const tiles: TileKey[][] = Array.from({ length: H }, () => Array<TileKey>(W).fill('sand'));
-  const set = (x: number, y: number, t: TileKey) => { if (x >= 0 && y >= 0 && x < W && y < H) tiles[y][x] = t; };
-  const inEllipse = (x: number, y: number, cx: number, cy: number, rx: number, ry: number) => ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1;
-
-  // Muralla de roca roja alrededor (como las paredes del Valle de la Luna).
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const d = Math.min(x, y, W - 1 - x, H - 1 - y);
-    if (d < 2 || (d === 2 && rnd() < 0.5)) set(x, y, 'cliff');
-  }
-
-  // Camino de tierra compactada de 2 casillas, en zigzag desde la entrada (abajo) hacia el salar (arriba a la derecha).
-  const road: [number, number][] = [];
-  const carve = (x0: number, y0: number, x1: number, y1: number) => {
-    for (let x = Math.min(x0, x1); x <= Math.max(x0, x1) + (y0 === y1 ? 0 : 1); x++)
-      for (let y = Math.min(y0, y1); y <= Math.max(y0, y1) + (x0 === x1 ? 0 : 1); y++) { set(x, y, 'road'); road.push([x, y]); }
-  };
-  carve(22, 38, 22, 30);
-  carve(10, 30, 22, 30);
-  carve(10, 19, 10, 30);
-  carve(10, 19, 30, 19);
-  carve(30, 9, 30, 19);
-  const distRoad = (x: number, y: number) => road.reduce((m, [px, py]) => Math.min(m, Math.hypot(px - x, py - y)), 99);
-
-  // Matorral seco (donde aparecen Pokémon): parches junto al camino.
-  const patches = [[28, 33, 7, 3.4], [6, 25, 3.6, 4.6], [20, 24, 5, 3], [38, 22, 3.6, 5], [20, 14, 6.5, 3], [15, 8, 5, 3.4], [37, 31, 3.6, 3]];
-  const inPatch = (x: number, y: number) => patches.some(([cx, cy, rx, ry]) => inEllipse(x, y, cx, cy, rx, ry));
-  for (let y = 3; y < H - 3; y++) for (let x = 3; x < W - 3; x++) if (tiles[y][x] === 'sand' && inPatch(x, y)) set(x, y, 'brush');
-
-  // Salar con su laguna (arriba a la derecha, como la Laguna Chaxa).
-  for (let y = 3; y < H - 3; y++) for (let x = 3; x < W - 3; x++) {
-    if (tiles[y][x] === 'road') continue;
-    if (inEllipse(x, y, 35, 8, 7.5, 4.2)) set(x, y, inEllipse(x, y, 35, 8, 3.4, 1.9) ? 'water' : 'salt');
-  }
-
-  // Formaciones de roca roja (Valle de la Luna), alejadas del camino.
-  const blobs = [[16, 34, 3, 2], [4, 14, 2.5, 3.5], [24, 28, 2.2, 1.6], [34, 28, 2.6, 2.2], [18, 4, 4, 1.8], [27, 5, 2.4, 2], [6, 6, 3, 2.4], [39, 15, 2, 3], [14, 22, 2.2, 1.8]];
-  for (let y = 3; y < H - 3; y++) for (let x = 3; x < W - 3; x++)
-    if (tiles[y][x] === 'sand' && blobs.some(([cx, cy, rx, ry]) => inEllipse(x, y, cx, cy, rx, ry)) && distRoad(x, y) > 2) set(x, y, 'cliff');
-
-  // Cardones, piedras y dunas sueltos, sin tapar el camino ni el matorral.
-  for (let y = 3; y < H - 3; y++) for (let x = 3; x < W - 3; x++) {
-    if (tiles[y][x] !== 'sand') continue;
-    const r = rnd();
-    if (distRoad(x, y) > 2.2 && !inPatch(x, y)) {
-      if (r < 0.07) set(x, y, 'cactus');
-      else if (r < 0.10) set(x, y, 'rockd');
-      else if (r < 0.24) set(x, y, 'dune');
-    } else if (r < 0.04) set(x, y, 'dune');
-  }
-
-  // Entrada abierta al sur (conecta con la Ruta Los Aromos) y todo lo caminable alcanzable desde ahí.
-  for (let y = H - 3; y < H; y++) for (const x of [22, 23]) set(x, y, 'road');
-  const start = { x: 22, y: H - 2 };
-  const seen = Array.from({ length: H }, () => Array<boolean>(W).fill(false));
-  const queue: [number, number][] = [[start.x, start.y]];
-  seen[start.y][start.x] = true;
-  while (queue.length) {
-    const [x, y] = queue.shift()!;
-    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const nx = x + dx, ny = y + dy;
-      if (nx < 0 || ny < 0 || nx >= W || ny >= H || seen[ny][nx] || !isWalkable(tiles[ny][nx])) continue;
-      seen[ny][nx] = true;
-      queue.push([nx, ny]);
-    }
-  }
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (isWalkable(tiles[y][x]) && !seen[y][x]) set(x, y, 'cliff');
-
-  const exits: Exit[] = [22, 23].map((x) => ({ x, y: H - 1, to: 'aromos', tx: 26 + (x - 22), ty: 1, dir: 'down' as const }));
-  return { w: W, h: H, tiles, start, exits };
+  const map = buildOpen({
+    w: ATACAMA.w, h: ATACAMA.h, entryX: ATACAMA.entryX, entryOpen: true, seed: 20262024,
+    ground: 'sand', border: 'cliff', road: 'road', tall: 'brush', obstacle: 'cliff', clumps: 40, patches: 28,
+    lakes: [{ cx: 0.74, cy: 0.14, rx: 12, ry: 6, ring: 'salt' }],   // salar con laguna, como la Laguna Chaxa
+    decor: [['cactus', 0.06], ['rockd', 0.03], ['dune', 0.14]], nearDecor: ['dune', 0.04],
+  });
+  map.exits = [ATACAMA.entryX, ATACAMA.entryX + 1].map((x) => ({ x, y: ATACAMA.h - 1, to: 'aromos', tx: AROMOS.exitX + (x - ATACAMA.entryX), ty: 1, dir: 'down' as const }));
+  return map;
 }
 
 // ---------- Pokémon salvajes de la ruta ----------

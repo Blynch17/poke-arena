@@ -93,15 +93,28 @@ En la selección de equipo, **TAB** también tiene el modo *aventura*: el equipo
 con hierba alta, como en los juegos de la serie. Se controla un entrenador huaso chileno (arte original, hecho con
 `tools/make_trainer_sprite.py`).
 
-- Camina con **W/A/S/D** o las flechas (o con clic del mouse, si los controles están en *Mouse*; el personaje busca el
-  camino hasta ese punto). **ENTER** abre el menú (volumen, controles y salir).
-- En la hierba alta puede aparecer un Pokémon salvaje (14 % por paso, y nunca en los 3 primeros pasos). Empieza la
-  misma batalla del modo salvaje, con captura incluida; al huir o ganar vuelves al mismo lugar de la ruta.
-- Al costado del camino espera **el huaso Anselmo** (`RIVAL` en `src/route.ts`): si cruzas su línea de visión te reta a un
+- Caminas **solo con W/A/S/D**. **ENTER** abre el menú (volumen, controles y salir).
+- **Las rutas son grandes** (unos 80 × 70 tiles, varias pantallas): claros amplios, arboledas, lagunas y muchos parches de hierba
+  alta (matorral en el desierto). Se generan con una semilla fija en `buildOpen()` (`src/route.ts`).
+- **Sistema mixto de encuentros.** Hay dos formas de encontrarse un salvaje:
+  - *En la hierba alta* puede aparecer uno al caminar (10 % por paso, y nunca en los 3 primeros pasos), como siempre.
+  - *Visibles en la ruta*: cada pocos segundos puede salir un Pokémon de la hierba (hasta 4 a la vez), que pasea por el
+    claro y, pasado un rato (26 a 52 s), **vuelve a esconderse en la hierba alta** y desaparece. Tienen un temperamento
+    según su nivel frente al de tu primer Pokémon y su velocidad: **agresivos** (te notan a 7 casillas, aparece un `!` y te
+    persiguen; al alcanzarte, batalla. Su **rango de acción** es de 10 casillas desde donde aparecieron, y 12 s como máximo: si te alejas más, se rinden, vuelven a su lugar y no te notan por 8 a 14 s; caminan un poco más lento que tú, así que si corres se te escapan), **neutrales** (pasean sin hacerte caso: solo hay batalla si chocas con ellos) y
+    **huidizos** (a 5 casillas aparece un `?` y salen corriendo; si los acorralas, pelean). Los valores están al inicio de
+    `src/scenes/WorldScene.ts` (`WILD_*`).
+- **Tus Pokémon en la ruta.** Abajo ves el equipo (1 a 6): **en gris** si está en su Poké Ball, **a color** si está afuera,
+  con su barra de PS. Elige con **← →** (o las teclas **1 a 6**) y pulsa **P**: si está en su bola, **lanzas la bola hacia el
+  cursor** (alcanza 9 casillas) y sale el Pokémon donde cae; si ya está afuera, lo guardas. Con el Pokémon elegido afuera,
+  **clic** en el suelo lo manda a ese punto, y **clic sobre un salvaje** lo manda a atacarlo: al llegar, empieza la batalla con
+  **ese Pokémon como el primero en salir**. Si la bola cae a 3 casillas o menos de un salvaje, la batalla también empieza (huya o
+  no). Tras una orden el Pokémon se queda un rato por ahí y luego vuelve contigo.
+- Junto a un tramo recto del camino espera **el huaso Anselmo** (su lugar lo fija el mapa; `RIVAL` en `src/route.ts`): si cruzas su línea de visión te reta a un
   combate de equipos. No se puede huir ni capturar sus Pokémon; si pierdes vuelves a la entrada de la ruta, y si ganas
   ya no te reta de nuevo (hasta que salgas de la aventura). Su sprite sale de `tools/make_rival_sprite.py`.
-- Qué aparece y a qué nivel está en `ROUTE_ENCOUNTERS` (`src/route.ts`); el mapa se genera en `buildRoute()` con una
-  semilla fija.
+- Qué aparece y a qué nivel está en `ROUTE_ENCOUNTERS` (`src/route.ts`); los mapas (`buildRoute()` y `buildAtacama()`)
+  salen siempre iguales.
 - **Los PS y los PP se conservan entre batallas** (también los objetos gastados): nada se recupera solo, y en el menú
   Pokémon ves cuánto le queda a cada uno. Si pierdes, vuelves a la entrada y el equipo se cura. Al salir de la aventura
   al menú de equipos todo se reinicia.
