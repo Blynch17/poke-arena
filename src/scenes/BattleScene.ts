@@ -2,7 +2,7 @@ import Phaser from 'phaser';
 import {
   POKEMON, PokemonDef, Party, Move, Stages, Stats, Fighter, StatKey, calcDamage, TYPE_COLOR, ITEMS, ItemId, ENERGY_MAX, ENERGY_REGEN,
   STRUGGLE, newStages, stageMult, maxUses, STAT_NAME, STAGE_MAX, SPEED_STAGE_EFFECT,
-  BALLS, BallId, makeCombatant, WILD_LEVEL_MIN, WILD_LEVEL_MAX, HP_MULT, effectiveness, moveByKey, Debuff, HEAL_LOCK, DRAIN_SCALE,
+  BALLS, BallId, walkScale, makeCombatant, WILD_LEVEL_MIN, WILD_LEVEL_MAX, HP_MULT, effectiveness, moveByKey, Debuff, HEAL_LOCK, DRAIN_SCALE, LEGENDARY,
 } from '../data';
 import { MAX_MOVES, defaultMoves, movesLearnedBetween, withMoves, evolutionsAt, Evolution } from '../moveset';
 import { START_LEVEL, MAX_LEVEL, expAt, expYield } from '../exp';
@@ -252,7 +252,8 @@ export class BattleScene extends Phaser.Scene {
       const level = data.wildLevel ?? Phaser.Math.Between(WILD_LEVEL_MIN, WILD_LEVEL_MAX);
       this.enemy = this.makeSide(false, [def], A.x + A.w - 160, A.y + A.h / 2, [level]);
     } else {
-      const others = Phaser.Utils.Array.Shuffle([...POKEMON]).slice(0, Phaser.Math.Clamp(mine.length, 1, 6));   // el rival lleva tantos Pokémon como tú
+      const pool = data.trainerLevel ? POKEMON.filter((p) => !LEGENDARY.has(p.id)) : POKEMON;   // en la aventura, sin legendarios
+      const others = Phaser.Utils.Array.Shuffle([...pool]).slice(0, Phaser.Math.Clamp(mine.length, 1, 6));   // el rival lleva tantos Pokémon como tú
       const lv = data.trainerLevel;   // los entrenadores de la aventura traen su nivel; sube 1 con cada Pokémon del equipo
       this.enemy = this.makeSide(false, others, A.x + A.w - 160, A.y + A.h / 2, lv ? others.map((_, i) => Math.min(MAX_LEVEL, lv + Math.floor(i / 2))) : []);
     }
@@ -315,7 +316,7 @@ export class BattleScene extends Phaser.Scene {
       return { def, own: isPlayer ? own : null, acc: 0, ...c, hp: c.maxHp, exp: expAt(c.level), energy: ENERGY_MAX, stages: newStages(), pp: def.moves.map(maxUses), status: null, statusLeft: 0, statusAge: 0, tickIn: 1000, confLeft: 0, graceLeft: 0 };
     });
     const facing = new Phaser.Math.Vector2(isPlayer ? 1 : -1, 0);
-    const sprite = this.add.image(x, y, `${defs[0].id}-walk`, 0).setScale(SPRITE_SCALE).setDepth(10);
+    const sprite = this.add.image(x, y, `${defs[0].id}-walk`, 0).setScale(SPRITE_SCALE * walkScale(defs[0].id)).setDepth(10);
     const shadow = this.add.ellipse(x, y + 36, 60, 18, 0x000000, 0.3).setDepth(5);
     const arrow = this.add.triangle(0, 0, 0, -9, 18, 0, 0, 9, 0xffffff, 0.85).setDepth(6);
     const aura = this.add.ellipse(x, y, 96, 104, 0xffe066, 0.3).setStrokeStyle(3, 0xffe066).setDepth(4).setVisible(false);
@@ -327,6 +328,9 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private cur(s: Side): Member { return s.team[s.active]; }
+
+  /** Escala del sprite del Pokémon en combate (los de cuadros de 64×64 se dibujan 1,4 veces más grandes que los de 32×32). */
+  private ss(s: Side): number { return SPRITE_SCALE * walkScale(this.cur(s).def.id); }
 
   // ¿Puede recibir un golpe ahora? (no si está debilitado, escondido en pleno Vuelo/Excavar o recién llegado)
   private canHit(s: Side): boolean { return !s.down && !s.hidden && this.t >= s.invuln; }
@@ -527,7 +531,7 @@ export class BattleScene extends Phaser.Scene {
     e.sprite.clearTint().setTintMode(Phaser.TintModes.MULTIPLY);
     e.shadow.setVisible(true);
     e.arrow.setVisible(true);
-    this.tweens.add({ targets: e.sprite, scale: SPRITE_SCALE, duration: 220 });
+    this.tweens.add({ targets: e.sprite, scale: this.ss(e), duration: 220 });
     const msgs = ['¡Se escapó al instante!', '¡Parecía que lo atrapabas!', '¡Casi lo atrapas!', '¡Por muy poco!'];
     this.toast(msgs[Math.min(roll.shakes, 3)]);
     await this.wait(300);
@@ -765,7 +769,7 @@ export class BattleScene extends Phaser.Scene {
     side.leap = null;
     side.hidden = false;
     side.lift = 0;
-    side.sprite.setScale(SPRITE_SCALE);
+    side.sprite.setScale(this.ss(side));
   }
 
   private updateLeaps(dt: number) {
@@ -780,7 +784,7 @@ export class BattleScene extends Phaser.Scene {
         const k = t / cfg.up;
         if (!L.started) { L.started = true; this.fx.ring(sx, sy + 20, kind === 'dig' ? 0xc09a5a : 0xffffff, 10, 70, 350, 4); }
         if (kind === 'dig') {
-          side.sprite.setScale(SPRITE_SCALE * (1 - 0.85 * k));
+          side.sprite.setScale(this.ss(side) * (1 - 0.85 * k));
           for (let i = 0; i < 2; i++) this.fx.spawn(sx + (Math.random() - 0.5) * 50, sy + 24, { vx: (Math.random() - 0.5) * 140, vy: -100 - Math.random() * 100, g: 800, life: 460, s0: 10, s1: 3, colors: [0xe0c68a, 0xc09a5a, 0xa07840] });
         } else {
           side.lift = LIFT_MAX * k * k;
@@ -876,7 +880,7 @@ export class BattleScene extends Phaser.Scene {
     side.lockUntil = this.t + 360;
     this.floatText(side.sprite.x, side.sprite.y - 60, '¡Pero no pasó nada!', '#9fd8ff');
     this.fx.impact('water', side.sprite.x, side.sprite.y + 24, -Math.PI / 2, 30);
-    this.tweens.add({ targets: side.sprite, scaleY: SPRITE_SCALE * 1.22, scaleX: SPRITE_SCALE * 0.85, duration: 120, yoyo: true, repeat: 1, onComplete: () => side.sprite.setScale(SPRITE_SCALE) });
+    this.tweens.add({ targets: side.sprite, scaleY: this.ss(side) * 1.22, scaleX: this.ss(side) * 0.85, duration: 120, yoyo: true, repeat: 1, onComplete: () => side.sprite.setScale(this.ss(side)) });
   }
 
   // Transformación (Ditto): copia especie, tipos, stats (menos los PS) y ataques del rival durante toda la batalla.
@@ -890,7 +894,7 @@ export class BattleScene extends Phaser.Scene {
     this.floatText(side.sprite.x, side.sprite.y - 60, `¡Ditto se transformó en ${foe.def.name}!`, '#ffb3e6');
     this.fx.rise(side.sprite.x, side.sprite.y, 0xff8fcf, 10);
     this.fx.ring(side.sprite.x, side.sprite.y, 0xffd1ec, 20, 90, 450, 4);
-    this.tweens.add({ targets: side.sprite, scaleX: SPRITE_SCALE * 0.2, scaleY: SPRITE_SCALE * 1.4, duration: 170, yoyo: true, onComplete: () => side.sprite.setScale(SPRITE_SCALE) });
+    this.tweens.add({ targets: side.sprite, scaleX: this.ss(side) * 0.2, scaleY: this.ss(side) * 1.4, duration: 170, yoyo: true, onComplete: () => side.sprite.setScale(this.ss(side)) });
     if (side.isPlayer) this.refreshMoveTexts();
   }
 
@@ -1411,7 +1415,7 @@ export class BattleScene extends Phaser.Scene {
     side.sprite.clearTint();
     side.down = false;
     side.cd = [this.t + 300, this.t + 300, this.t + 300, this.t + 300];
-    side.sprite.setVisible(true).setTexture(`${this.cur(side).def.id}-walk`, 0);
+    side.sprite.setVisible(true).setTexture(`${this.cur(side).def.id}-walk`, 0).setScale(this.ss(side));
     side.shadow.setVisible(true);
     side.arrow.setVisible(true);
     if (side.isPlayer) this.refreshMoveTexts();
@@ -1587,7 +1591,7 @@ export class BattleScene extends Phaser.Scene {
     const options = evolutionsAt(base.id, mem.level);
     if (!options.length) { this.nextStep(); return; }
     if (options.length === 1) { this.evolve(idx, mem, options[0]); return; }
-    this.showChoice(`¡${base.name} está evolucionando!`, '¿En qué quiere evolucionar?', options.map((o) => POKEMON[o.toIndex].name), (i) => this.evolve(idx, mem, options[i]));
+    this.showChoice(`¡${base.name} está evolucionando!`, '¿En qué quiere evolucionar?', options.map((o) => `${POKEMON[o.toIndex].name}   ·   ${o.how === 'nivel' ? `nivel ${o.level}` : o.how}`), (i) => this.evolve(idx, mem, options[i]));
   }
 
   private evolve(idx: number, mem: Member, evo: Evolution) {

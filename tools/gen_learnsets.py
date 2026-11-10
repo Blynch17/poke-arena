@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Genera src/learnsets.ts y src/moves_gen.ts a partir de PokeAPI (https://pokeapi.co).
 
-  python3 tools/gen_learnsets.py            # las especies que hay en el juego (151)
-  python3 tools/gen_learnsets.py 1 493      # un rango de número de Pokédex (cuando se sumen más generaciones)
+  python3 tools/gen_learnsets.py            # Pokédex 1 a 493 (generaciones 1 a 4)
+  python3 tools/gen_learnsets.py 1 251      # otro rango de número de Pokédex
+
+Las especies que no están en roster.ts (generaciones nuevas) se generan en src/species_gen.ts con sus stats base, tipos,
+índice de captura y 4 ataques, siempre que existan sus sprites en public/sprites (si faltan, se avisa y se omiten).
 
 - learnsets.ts: por especie, qué ataque aprende en cada nivel (la lista de «Ultra Sol / Ultra Luna») y a qué nivel
   evoluciona. Las evoluciones por piedra, intercambio o felicidad no tienen nivel en los juegos: aquí se les asigna uno
@@ -58,9 +61,12 @@ for m in re.finditer(r"^\s*\['([a-z0-9-]+)', [\"'].+?[\"'], (\d+),", rost, re.M)
 for m in re.finditer(r"(\w+): (\d+)", re.search(r"const DEX: Record<string, number> = \{(.*?)\};", data_ts, re.S).group(1)):
     species[int(m.group(2))] = m.group(1)
 
-lo, hi = (int(sys.argv[1]), int(sys.argv[2])) if len(sys.argv) >= 3 else (min(species), max(species))
-dexes = [d for d in range(lo, hi + 1) if (d in species) or len(sys.argv) >= 3]
-sid = lambda dex, api_name: species.get(dex) or api_name.replace('-', '')  # noqa: E731
+lo, hi = (int(sys.argv[1]), int(sys.argv[2])) if len(sys.argv) >= 3 else (1, 493)
+base_dexes = set(species)   # las que ya están a mano en roster.ts / data.ts
+SPRITES = os.path.join(ROOT, 'public/sprites')
+has_sprites = lambda name: all(os.path.exists(os.path.join(SPRITES, f'{name}-{k}.png')) for k in ('front', 'back', 'walk'))  # noqa: E731
+dexes = list(range(lo, hi + 1))
+sid = lambda dex, api_name: species.get(dex) or api_name  # noqa: E731   # los ids nuevos son el nombre de PokeAPI (ho-oh, mr-mime...)
 
 # ---------- especies ----------
 def load_species(dex):
@@ -104,6 +110,8 @@ def walk(node):
             how, level = 'happiness', EVO_FALLBACK['happiness']
         else:
             how, level = 'other', EVO_FALLBACK['other']
+        if frm in loaded and loaded[frm][1].get('is_baby') and how != 'level-up':
+            how, level = 'happiness', 12   # las crías (Pichu, Cleffa, Togepi...) evolucionan pronto
         if frm in loaded:
             evolutions.setdefault(frm, []).append((nxt['species']['name'], to, level, how))
         walk(nxt)
@@ -241,6 +249,48 @@ for name, m in mdata.items():
         continue
     skipped.append(name)
 
+# ---------- especies nuevas (generaciones que no están a mano en roster.ts) ----------
+def power_of(key_name):
+    m = mdata.get(key_name)
+    return (m.get('power') or 0) if m and m['damage_class']['name'] != 'status' else 0
+
+rev = {v: k for k, v in key_of.items()}   # clave del juego -> nombre de PokeAPI (para saber su poder)
+def four_moves(dex):
+    """4 ataques para la arena: los 3 más fuertes que aprende hasta el nivel 50 y el último de utilidad (o el 4.º más fuerte)."""
+    keys = []
+    for lvl, name in learn[dex]:
+        if lvl <= 50 and name in key_of and key_of[name] not in keys:
+            keys.append(key_of[name])
+    if not keys:
+        keys = [EMPTY_FALLBACK.get(sid(dex, loaded[dex][1]['name'])) or 'tackle']
+    dmg = sorted([k for k in keys if power_of(rev.get(k, '')) > 0], key=lambda k: -power_of(rev[k]))
+    util = [k for k in keys if k not in dmg][::-1]
+    pick = dmg[:3] + util[:1]
+    for k in dmg[3:]:
+        if len(pick) >= 4: break
+        pick.append(k)
+    return pick[:4] or keys[:4]
+
+def png_width(path):
+    with open(path, 'rb') as f:
+        return int.from_bytes(f.read(24)[16:20], 'big')
+big_walk = sorted(n for n in (species.get(d) or loaded[d][1]['name'] for d in dexes)
+                  if os.path.exists(os.path.join(SPRITES, f'{n}-walk.png')) and png_width(os.path.join(SPRITES, f'{n}-walk.png')) >= 128)
+new_species, missing_sprites = [], []
+for dex in dexes:
+    if dex in base_dexes:
+        continue
+    poke, sp = loaded[dex]
+    name = sp['name']   # el nombre de la especie (deoxys), no el de la forma por defecto (deoxys-normal)
+    if not has_sprites(name):
+        missing_sprites.append(f'{dex} {name}'); continue
+    st = {x['stat']['name']: x['base_stat'] for x in poke['stats']}
+    base = [st['hp'], st['attack'], st['defense'], st['special-attack'], st['special-defense'], st['speed']]
+    types = [t['type']['name'] for t in sorted(poke['types'], key=lambda t: t['slot'])]
+    es = next((n['name'] for n in sp['names'] if n['language']['name'] == 'es'), name.capitalize())
+    new_species.append((name, es, dex, types, base, sp['capture_rate'], four_moves(dex)))
+    species[dex] = name   # a partir de aquí tiene id (para las evoluciones y los aprendizajes)
+
 # ---------- salida ----------
 def esc(s): return s.replace("'", "\\'")
 
@@ -267,20 +317,33 @@ L = ['// GENERADO por tools/gen_learnsets.py a partir de PokeAPI. Los ataques po
 for dex in dexes:
     rows = [(l, key_of[n]) for l, n in learn[dex] if n in key_of]
     if not rows:   # solo aprende ataques que el juego no sabe hacer (Abra: Teletransporte): se le da uno de arranque
-        sid_ = sid(dex, loaded[dex][0]['name'])
+        sid_ = sid(dex, loaded[dex][1]['name'])
         rows = [(1, EMPTY_FALLBACK.get(sid_) or species_keys.get(sid_, ['tackle'])[0])]
     body = ', '.join('[%d, "%s"]' % (l, k) for l, k in rows)
-    L.append("  '%s': [%s]," % (sid(dex, loaded[dex][0]['name']), body))
+    L.append("  '%s': [%s]," % (sid(dex, loaded[dex][1]['name']), body))
 L += ['};', '',
       '/** A qué evoluciona cada especie y en qué nivel (`how`: cómo evoluciona en los juegos). */',
       'export const EVOLUTIONS: Record<string, { to: string; level: number; how: string }[]> = {']
 for dex in dexes:
     if dex in evolutions:
         body = ', '.join("{ to: '%s', level: %d, how: '%s' }" % (sid(to, nm), lv, HOW[how]) for nm, to, lv, how in evolutions[dex])
-        L.append("  '%s': [%s]," % (sid(dex, loaded[dex][0]['name']), body))
+        L.append("  '%s': [%s]," % (sid(dex, loaded[dex][1]['name']), body))
 L += ['};', '']
 open(os.path.join(ROOT, 'src/learnsets.ts'), 'w', encoding='utf-8').write('\n'.join(L))
 
+S = ['// GENERADO por tools/gen_learnsets.py. Especies de las generaciones nuevas: id, nombre, número de Pokédex, tipos, stats base, índice',
+     '// de captura y los 4 ataques que usa en la arena (los de aprendizaje por nivel están en learnsets.ts).', '',
+     "import type { SpeciesRow } from './roster';", '', 'export const GEN_SPECIES: SpeciesRow[] = [']
+for name, es, dex, types, base, catch_, moves in new_species:
+    S.append("  [%s, %s, %d, [%s], [%s], %d, [%s]]," % (json.dumps(name), json.dumps(es, ensure_ascii=False), dex,
+             ', '.join("'%s'" % t for t in types), ', '.join(map(str, base)), catch_, ', '.join("'%s'" % k for k in moves)))
+S += ['];', '',
+      '/** Especies cuya hoja de caminata es de 64×64 (128×256) en vez de 32×32: se detectan por el ancho del PNG. */',
+      'export const BIG_WALK_IDS: string[] = [%s];' % ', '.join("'%s'" % n for n in big_walk), '']
+open(os.path.join(ROOT, 'src/species_gen.ts'), 'w', encoding='utf-8').write('\n'.join(S))
+if missing_sprites:
+    print('SIN SPRITES (omitidas):', ', '.join(missing_sprites))
+print(f'{len(new_species)} especies nuevas en species_gen.ts')
 print(f'{len(dexes)} especies, {len(move_names)} ataques distintos: {len(new_moves)} de daño, {len(new_boosts)} de mejora, '
       f'{len(new_status)} de estado, {len(new_debuffs)} que bajan stats, {len(new_heals)} que curan nuevos; '
       f'{len(new_drain)} con absorción, {len(new_drops)} con bajada secundaria; {len(skipped)} omitidos')

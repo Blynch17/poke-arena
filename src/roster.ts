@@ -4,6 +4,7 @@
 
 import type { PType, Category, Stages, Debuff } from './data';
 import type { StatusId, Inflict } from './status';
+import { GEN_SPECIES } from './species_gen';
 import { GEN_MOVES, GEN_BOOSTS, GEN_STATUS, GEN_INFLICT, GEN_ACCURACY, GEN_DEBUFFS, GEN_HEALS, GEN_DRAIN, GEN_DROPS } from './moves_gen';
 
 /** Datos opcionales de un ataque: alcance (área), proyectiles en abanico (multi, spread) y bumerán. */
@@ -399,6 +400,9 @@ export const SPECIES: SpeciesRow[] = [
   ['mewtwo', 'Mewtwo', 150, ['psychic'], [106, 110, 90, 154, 90, 130], 3, ['psystrike', 'shadowball', 'icebeam', 'calmmind']],
   ['mew', 'Mew', 151, ['psychic'], [100, 100, 100, 100, 100, 100], 45, ['psychic', 'flamethrower', 'thunderbolt', 'calmmind']],
 ];
+
+// Especies de las generaciones nuevas (generadas por tools/gen_learnsets.py).
+SPECIES.push(...GEN_SPECIES);
 
 // Ataques que solo aparecen en las listas de aprendizaje por nivel (generados por tools/gen_learnsets.py): se suman al
 // catálogo sin pisar los que ya estaban.

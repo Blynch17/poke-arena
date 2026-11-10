@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { POKEMON, PokemonDef, Party, maxUses, makeCombatant, moveByKey } from '../data';
+import { POKEMON, walkScale, PokemonDef, Party, maxUses, makeCombatant, moveByKey } from '../data';
 import { defaultMoves, withMoves } from '../moveset';
 import { START_LEVEL, expAt } from '../exp';
 import { Entry, teamCards, dataPanel, cardMetrics } from '../teamui';
@@ -384,7 +384,7 @@ export class WorldScene extends Phaser.Scene {
     const cands: [number, number][] = [[px - back[0], py - back[1]], [px + back[1], py - back[0]], [px - back[1], py + back[0]], [px + back[0], py + back[1]]];
     for (let r = 2; r <= 3; r++) for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) if (Math.max(Math.abs(dx), Math.abs(dy)) === r) cands.push([px + dx, py + dy]);
     const at = cands.find(([x, y]) => this.walkable(x, y) && !this.occupied(x, y)) ?? [px, py];
-    const img = this.add.image((at[0] + 0.5) * TILE, (at[1] + 1) * TILE, `${this.sp(id).id}-walk`, ROW[this.dir] * 2).setOrigin(0.5, 1).setScale(2).setDepth((at[1] + 1) * TILE + 1);
+    const img = this.add.image((at[0] + 0.5) * TILE, (at[1] + 1) * TILE, `${this.sp(id).id}-walk`, ROW[this.dir] * 2).setOrigin(0.5, 1).setScale(2 * walkScale(this.sp(id).id)).setDepth((at[1] + 1) * TILE + 1);
     const f: Follower = { id, img, tx: at[0], ty: at[1], dir: this.dir, mv: null, wait: 600 + Math.random() * 800, goal: null, away: 0, returning: false };
     this.followers.push(f);
     if (pop) { img.setScale(0.2).setAlpha(0.2); this.tweens.add({ targets: img, scale: 2, alpha: 1, duration: 260, ease: 'Back.easeOut' }); }

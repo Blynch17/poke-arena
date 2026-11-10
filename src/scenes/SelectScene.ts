@@ -36,7 +36,7 @@ export class SelectScene extends Phaser.Scene {
     this.badges = [];
     this.rowObjs = [];
     this.lit = -1;
-    this.input.keyboard!.addCapture('UP,DOWN,LEFT,RIGHT,ENTER,SPACE,TAB');
+    this.input.keyboard!.addCapture('UP,DOWN,LEFT,RIGHT,ENTER,SPACE,TAB,PAGE_UP,PAGE_DOWN,HOME,END');
 
     const bg = this.cameras.main.backgroundColor;
     const fixed = <T extends Phaser.GameObjects.GameObject & Phaser.GameObjects.Components.ScrollFactor & Phaser.GameObjects.Components.Depth>(o: T, d = 21) => o.setScrollFactor(0).setDepth(d) as T;
@@ -83,6 +83,9 @@ export class SelectScene extends Phaser.Scene {
     else if (e.key === 'ArrowLeft') this.cursor = (this.cursor + n - 1) % n;
     else if (e.key === 'ArrowDown') this.moveVertical(1);
     else if (e.key === 'ArrowUp') this.moveVertical(-1);
+    else if (e.key === 'PageDown' || e.key === 'PageUp') this.cursor = Phaser.Math.Clamp(this.cursor + (e.key === 'PageDown' ? 1 : -1) * 6 * COLS, 0, POKEMON.length - 1);   // salta 6 filas (son 493)
+    else if (e.key === 'Home') this.cursor = 0;
+    else if (e.key === 'End') this.cursor = POKEMON.length - 1;
     else if (e.key === 'Tab') this.mode = this.mode === 'arena' ? 'wild' : this.mode === 'wild' ? 'adventure' : 'arena';
     else if (e.key === 'Backspace') this.picks.pop();
     else if (e.key === ' ' || e.key === 'Enter') {
@@ -141,7 +144,7 @@ export class SelectScene extends Phaser.Scene {
     const n = this.picks.length;
     const hintText = n === MAX_TEAM ? 'ESPACIO o ENTER: ¡Comenzar con 6!   (Retroceso: quitar el último)'
       : n >= 1 ? `ESPACIO: ¡Comenzar con ${n}!   ·   ENTER: sumar otro (hasta ${MAX_TEAM})   ·   Retroceso: quitar`
-      : 'Flechas: mover   ENTER: elegir (de 1 a 6)   Retroceso: quitar';
+      : 'Flechas: mover   AvPág / RePág: saltar   ENTER: elegir (de 1 a 6)   Retroceso: quitar';
     if (this.hint.text !== hintText) this.hint.setText(hintText);
   }
 }

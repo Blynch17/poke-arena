@@ -98,3 +98,12 @@ Al sumar una especie a `SPECIES` (`src/roster.ts`), corre `python3 tools/gen_lea
 por ejemplo `1 493`) para regenerar `src/learnsets.ts` y `src/moves_gen.ts`: así la especie aprende ataques por nivel y
 evoluciona en la aventura. Los ataques de daño nuevos salen del poder, tipo, PP y precisión de PokeAPI; los que el juego
 todavía no sabe hacer (curar, bajar stats, clima...) se omiten. Las evoluciones sin nivel en los juegos usan `EVO_FALLBACK`.
+
+## Sumar una generación entera (con sus sprites)
+
+1. Copia a `public/sprites/` los tres archivos de cada especie: `<id>-front.png`, `<id>-back.png` y `<id>-walk.png`, con el
+   `id` del nombre de PokeAPI (`ho-oh`, `mr-mime`, `porygon2`...). La hoja `-walk` es de 2 columnas × 4 filas (abajo, arriba,
+   izquierda, derecha) de 32×32 por cuadro; si es de 64×64 (128×256), se detecta sola al generar (`BIG_WALK_IDS`).
+2. Corre `python3 tools/gen_learnsets.py 1 <último número de Pokédex>` (sin argumentos: 1 a 493). Genera `src/species_gen.ts` (las especies que tengan
+   sus tres sprites; las demás se avisan y se omiten), `src/learnsets.ts` y `src/moves_gen.ts`.
+3. Revisa el resultado en el navegador (la selección de equipo ya las muestra ordenadas por Pokédex).

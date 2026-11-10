@@ -14,7 +14,13 @@ Juego 2D de arena en tiempo real con Pokémon: te mueves libremente, lanzas ataq
 
 Menú de pausa: cambiar de Pokémon y usar objetos (Poción, Éter).
 
-Están los **151 Pokémon de la primera generación**. Los 11 primeros que se hicieron (Venusaur, Charizard, Blastoise, Pikachu,
+Están los **493 Pokémon de las generaciones 1 a 4**. Los 11 primeros de la primera generación, hechos a mano, están en `src/data.ts`; los 140 restantes en `src/roster.ts` y las generaciones 2 a 4 (342 especies) en `src/species_gen.ts`, generado con `tools/gen_learnsets.py` desde
+PokeAPI (stats base, tipos, índice de captura y 4 ataques para la arena); sus aprendizajes por nivel y evoluciones están en
+`src/learnsets.ts`. Las especies grandes (Ho-Oh, Lugia, Steelix, Wailord, Kyogre, Groudon, Rayquaza, Dialga, Palkia, Regigigas,
+Giratina y Arceus) tienen hojas de caminata de 64×64: se detectan solas por el tamaño del PNG (`BIG_WALK_IDS`) y se dibujan 1,4 veces
+más grandes que el resto. En la selección de equipo, **AvPág / RePág** saltan 6 filas, y Inicio / Fin van al primero y al último.
+
+De la primera generación, los 11 primeros que se hicieron (Venusaur, Charizard, Blastoise, Pikachu,
 Wigglytuff, Alakazam, Machamp, Golem, Gengar, Lapras y Dragonite) tienen ataques y efectos ajustados a mano en
 `src/data.ts`; los otros 140 salen de `src/roster.ts`: stats base y tipos actuales, 4 ataques que cada especie aprende de
 verdad en los juegos, y costo, recarga y proyectil calculados a partir del poder del ataque. Para cambiar un ataque o una
@@ -35,7 +41,7 @@ una X de cuchillas, un martillo de agua, ladrillos que saltan, etc. El listado c
 - **Rayo Solar** se carga ~1,8 s (se puede apuntar) y **Bomba Huevo** se lanza en arco y explota al caer.
 - Chorros y proyectiles con diseño propio: Rayo Hielo, Hiperrayo, Pulso Umbrío, Látigo Cepa, Tornado, Llamarada...
 
-Para sumar más combatientes, mira [docs/AGREGAR-POKEMON.md](docs/AGREGAR-POKEMON.md).
+Para sumar más combatientes o generaciones, mira [docs/AGREGAR-POKEMON.md](docs/AGREGAR-POKEMON.md).
 
 ## Estados alterados y la IA del rival
 

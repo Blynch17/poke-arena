@@ -1,3 +1,4 @@
+import { BIG_WALK_IDS } from './species_gen';
 import { MOVES, BOOSTS, SPECIES, STATUS_MOVES, INFLICT, ACCURACY, DEBUFFS, HEALS, DRAIN, DROPS } from './roster';
 import type { Inflict, StatusId } from './status';
 
@@ -79,6 +80,19 @@ export interface PokemonDef {
 }
 
 export const LEVEL = 50;
+
+/** Legendarios y singulares (generaciones 1 a 4): no salen en los equipos de los entrenadores de la aventura. */
+export const LEGENDARY = new Set([
+  'articuno', 'zapdos', 'moltres', 'mewtwo', 'mew', 'raikou', 'entei', 'suicune', 'lugia', 'ho-oh', 'celebi', 'regirock', 'regice',
+  'registeel', 'latias', 'latios', 'kyogre', 'groudon', 'rayquaza', 'jirachi', 'deoxys', 'uxie', 'mesprit', 'azelf', 'dialga', 'palkia',
+  'heatran', 'regigigas', 'giratina', 'cresselia', 'darkrai', 'shaymin', 'arceus', 'manaphy', 'phione',
+]);
+
+/** Especies grandes cuya hoja de caminata tiene cuadros de 64×64 (el resto, de 32×32; el orden de los cuadros es el mismo). */
+export const BIG_WALK = new Set(BIG_WALK_IDS);   // se detectan solos al generar (tools/gen_learnsets.py)
+export const walkSize = (id: string) => (BIG_WALK.has(id) ? 64 : 32);
+/** Cuánto se dibuja un sprite respecto a uno de 32×32: los de 64×64 salen 1,4 veces más grandes (y no 2). */
+export const walkScale = (id: string) => (BIG_WALK.has(id) ? 0.7 : 1);
 export const HP_MULT = 5; // la vida se multiplica por 5 para que los combates duren más
 export const ENERGY_MAX = 100;
 export const ENERGY_REGEN = 12; // por segundo

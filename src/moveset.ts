@@ -34,9 +34,9 @@ export function withMoves(def: PokemonDef, keys: string[]): PokemonDef {
 
 export interface Evolution { to: string; toIndex: number; level: number; how: string }
 
-/** A qué puede evolucionar una especie a ese nivel (solo especies que ya están en el juego). */
+/** A qué puede evolucionar una especie a ese nivel (solo especies que ya están en el juego). Si tiene varias ramas
+ *  (Eevee, Slowpoke, Tyrogue, Gloom...) y alguna ya se cumple, se ofrecen todas para elegir. */
 export function evolutionsAt(id: string, level: number): Evolution[] {
-  return (EVOLUTIONS[id] ?? [])
-    .filter((e) => e.level <= level && speciesIndex(e.to) >= 0)
-    .map((e) => ({ ...e, toIndex: speciesIndex(e.to) }));
+  const all = (EVOLUTIONS[id] ?? []).filter((e) => speciesIndex(e.to) >= 0).map((e) => ({ ...e, toIndex: speciesIndex(e.to) }));
+  return all.some((e) => e.level <= level) ? all : [];
 }

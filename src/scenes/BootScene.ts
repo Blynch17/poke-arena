@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { POKEMON } from '../data';
+import { POKEMON, walkSize } from '../data';
 import { makeFxTextures } from '../fx';
 import { makeTileTextures, makeDesertTextures } from '../tiles';
 
@@ -15,7 +15,7 @@ export class BootScene extends Phaser.Scene {
     for (const p of POKEMON) {
       this.load.image(`${p.id}-front`, `sprites/${p.id}-front.png`);
       this.load.image(`${p.id}-back`, `sprites/${p.id}-back.png`);
-      this.load.spritesheet(`${p.id}-walk`, `sprites/${p.id}-walk.png`, { frameWidth: 32, frameHeight: 32 });
+      this.load.spritesheet(`${p.id}-walk`, `sprites/${p.id}-walk.png`, { frameWidth: walkSize(p.id), frameHeight: walkSize(p.id) });
     }
   }
 
