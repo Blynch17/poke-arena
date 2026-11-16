@@ -1,6 +1,6 @@
 import Phaser from 'phaser';
 import {
-  POKEMON, PokemonDef, Party, Move, Stages, Stats, Fighter, StatKey, calcDamage, TYPE_COLOR, ITEMS, ItemId, ENERGY_MAX, ENERGY_REGEN,
+  POKEMON, PokemonDef, Party, PartyMon, Move, Stages, Stats, Fighter, StatKey, calcDamage, TYPE_COLOR, ITEMS, ItemId, ENERGY_MAX, ENERGY_REGEN,
   STRUGGLE, newStages, stageMult, maxUses, STAT_NAME, STAGE_MAX, SPEED_STAGE_EFFECT,
   BALLS, BallId, walkScale, makeCombatant, WILD_LEVEL_MIN, WILD_LEVEL_MAX, HP_MULT, effectiveness, moveByKey, Debuff, HEAL_LOCK, DRAIN_SCALE, LEGENDARY,
 } from '../data';
@@ -156,6 +156,8 @@ export class BattleScene extends Phaser.Scene {
   private postObjs: Phaser.GameObjects.GameObject[] = [];
   private choice: { sel: number; title: string; sub: string; options: string[]; pick: (i: number) => void } | null = null;
   private hintText: Phaser.GameObjects.Text | null = null;
+  private baseParty: Party = {};                 // lo que había en el equipo y el PC al empezar (los del PC no pelean pero se conservan)
+  private caught: { uid: number; rec: PartyMon; toTeam: boolean } | null = null;   // el Pokémon salvaje capturado en esta batalla
   private wildFleeAt = 0;   // un salvaje con Teletransporte huye a esta hora (this.t) después de que le pegan
 
   private fx!: Fx;
@@ -185,7 +187,7 @@ export class BattleScene extends Phaser.Scene {
     super('Battle');
   }
 
-  create(data: { team: number[]; wild?: boolean; wildId?: string; wildLevel?: number; trainer?: string; trainerLevel?: number; returnTo?: Record<string, unknown>; party?: Party; items?: { potion: number; ether: number } }) {
+  create(data: { team: number[]; wild?: boolean; wildId?: string; wildLevel?: number; trainer?: string; trainerTeam?: { id: string; level: number }[]; trainerLevel?: number; returnTo?: Record<string, unknown>; party?: Party; items?: { potion: number; ether: number } }) {
     this.shots = [];
     this.areas = [];
     this.moveTexts = [];
@@ -206,6 +208,8 @@ export class BattleScene extends Phaser.Scene {
     this.choice = null;
     this.hintText = null;
     this.wildFleeAt = 0;
+    this.baseParty = { ...(data.party ?? {}) };
+    this.caught = null;
     this.balls = { poke: 10, great: 5, ultra: 3, master: 1 };
     this.armed = null;
     this.thrown = [];
@@ -251,6 +255,10 @@ export class BattleScene extends Phaser.Scene {
       const def = POKEMON.find((p) => p.id === data.wildId) ?? (Phaser.Utils.Array.GetRandom(POKEMON) as PokemonDef);
       const level = data.wildLevel ?? Phaser.Math.Between(WILD_LEVEL_MIN, WILD_LEVEL_MAX);
       this.enemy = this.makeSide(false, [def], A.x + A.w - 160, A.y + A.h / 2, [level]);
+    } else if (data.trainerTeam?.length) {
+      // entrenador de la aventura: su equipo fijo, con sus niveles
+      const defs = data.trainerTeam.map((e) => POKEMON.find((p) => p.id === e.id)).filter((d): d is PokemonDef => !!d);
+      this.enemy = this.makeSide(false, defs, A.x + A.w - 160, A.y + A.h / 2, data.trainerTeam.map((e) => Math.min(MAX_LEVEL, e.level)));
     } else {
       const pool = data.trainerLevel ? POKEMON.filter((p) => !LEGENDARY.has(p.id)) : POKEMON;   // en la aventura, sin legendarios
       const others = Phaser.Utils.Array.Shuffle([...pool]).slice(0, Phaser.Math.Clamp(mine.length, 1, 6));   // el rival lleva tantos Pokémon como tú
@@ -541,7 +549,19 @@ export class BattleScene extends Phaser.Scene {
 
   // Gancho para el futuro: cuando el juego tenga historia, aquí el Pokémon capturado se sumará al equipo.
   // De momento no se guarda nada: solo termina la batalla.
-  private onCaptured(_mem: Member) { /* pendiente: agregar al equipo */ }
+  /** En la aventura el Pokémon capturado pasa a ser tuyo: entra al equipo si hay lugar (menos de 6) y, si no, queda en el PC.
+   *  Recibe un identificador nuevo (≥ 1000) porque puede ser de una especie que ya tienes. */
+  private onCaptured(mem: Member) {
+    if (!this.returnTo) return;
+    const species = POKEMON.findIndex((p) => p.id === mem.def.id);
+    if (species < 0) return;
+    const uid = Math.max(999, ...Object.keys(this.baseParty).map(Number), ...((this.returnTo.team as number[]) ?? [])) + 1;
+    const moves = mem.def.moves.map((m) => m.key).filter((k): k is string => !!k);
+    const own = moves.length ? moves : defaultMoves(mem.def.id, mem.level);
+    const c = makeCombatant(POKEMON[species], mem.level);
+    const rec: PartyMon = { hp: Math.max(1, Math.min(c.maxHp, Math.round(mem.hp))), pp: own.map((k) => maxUses(moveByKey(k))), level: mem.level, exp: expAt(mem.level), moves: own, species };
+    this.caught = { uid, rec, toTeam: ((this.returnTo.team as number[]) ?? []).length < 6 };
+  }
 
   private finishCaptured(mem: Member) {
     if (this.over) return;
@@ -555,8 +575,9 @@ export class BattleScene extends Phaser.Scene {
     this.buildQueue();
     const bg = this.add.rectangle(480, 320, 960, 640, 0x000000, 0.6).setDepth(90);
     const t1 = this.add.text(480, lines.length ? 120 : 250, '¡CAPTURADO!', { fontSize: '68px', color: '#7fc4ff', fontStyle: 'bold' }).setOrigin(0.5).setDepth(91);
-    const t2 = this.add.text(480, lines.length ? 185 : 320, `${mem.def.name}  Nv. ${mem.level}`, { fontSize: '30px', color: '#ffffff' }).setOrigin(0.5).setDepth(91);
-    const t3 = this.add.text(480, lines.length ? 580 : 380, this.hintLabel(), { fontSize: '22px', color: '#cfe8cf' }).setOrigin(0.5).setDepth(91);
+    const dest = this.caught ? (this.caught.toTeam ? 'Se unió a tu equipo' : 'Tu equipo está completo: fue enviado al PC') : '';
+    const t2 = this.add.text(480, lines.length ? 185 : 320, `${mem.def.name}  Nv. ${mem.level}${dest ? `\n${dest}` : ''}`, { fontSize: '30px', color: '#ffffff', align: 'center', lineSpacing: 6 }).setOrigin(0.5).setDepth(91);
+    const t3 = this.add.text(480, lines.length ? 580 : 400, this.hintLabel(), { fontSize: '22px', color: '#cfe8cf' }).setOrigin(0.5).setDepth(91);
     this.hintText = t3;
     this.menuLayer.add([bg, t1, t2, t3, ...this.expTexts(lines, 240)]);
   }
@@ -2150,13 +2171,19 @@ export class BattleScene extends Phaser.Scene {
 
   // Termina la batalla: vuelve al camino si venía del mundo, o a la selección de equipo.
   private leave() {
-    if (this.returnTo) this.scene.start('World', { ...this.returnTo, party: this.collectParty(), items: { ...this.inventory } });
+    if (this.returnTo) {
+      const rt = this.returnTo as { team: number[]; box?: number[] };
+      let team = rt.team, box = rt.box ?? [];
+      if (this.caught) { if (this.caught.toTeam) team = [...team, this.caught.uid]; else box = [...box, this.caught.uid]; }
+      this.scene.start('World', { ...this.returnTo, team, box, party: this.collectParty(), items: { ...this.inventory } });
+    }
     else this.scene.start('Select');
   }
 
   // PS y PP con los que sale cada Pokémon del jugador de la batalla (para la aventura).
   private collectParty(): Party {
-    const out: Party = {};
+    const out: Party = { ...this.baseParty };   // conserva también a los del PC
+    if (this.caught) out[this.caught.uid] = this.caught.rec;
     this.player.team.forEach((mem, i) => {
       const base = POKEMON[this.speciesIdx[i]];
       const transformed = mem.def.id !== base.id;   // Ditto copió los ataques del rival: sus PP propios no cambian

@@ -141,14 +141,18 @@ exactos se fijan al implementar cada ruta.
 | Ruta | Pasada | Nv | Pokémon | Notas |
 |---|---|---|---|---|
 | Cerro Pelado de Abajo | A/B | – | – | Pueblo, carrito, **Churrascos Anselmo**, posta rural |
-| Ruta Los Aromos *(existe)* | A | 3–10 | **Rattata, Pidgey, Caterpie, Weedle**, Oddish, Bellsprout, (Mankey, Growlithe) | Anselmo |
-| Camino del Rodeo | A | 6–12 | **Doduo, Spearow, Rattata**, Ponyta, Nidoran, (Tauros, Pinsir) | Medialuna |
-| Pomaire | A | 8–14 | **Diglett, Geodude, Sandshrew**, Slowpoke, (Rhyhorn) | Chanchos de greda |
-| Viñas de Colchagua | A | 10–16 | **Oddish, Bellsprout, Paras**, Venonat, Exeggcute, (Tangela) | Vendimia |
-| Lago Rapel | A | 8–16 | **Psyduck, Poliwag, Magikarp**, Goldeen, Krabby, (Slowbro) | Pesca |
+| **Ruta Los Aromos** *(existe)* | A | 3–10 | **Bidoof, Starly, Pidgey, Rattata**, Sentret, Zigzagoon, Caterpie, Weedle, (Pikachu, Eevee) | Pradera, rival Anselmo |
+| **Pastizales del Rodeo** *(existe)* | A | 5–13 | **Rattata, Spearow, Doduo**, Pidgey, Nidoran, Sentret, Ponyta, Mankey, (Miltank, Growlithe, Tauros, Farfetch'd) | Pasto dorado, Medialuna |
+| **Valle de las Flores** *(existe)* | A | 7–14 | **Oddish, Bellsprout, Hoppip, Sunkern**, Budew, Combee, Roselia, Ledyba, (Gloom, Weepinbell, Butterfree) | Amapolas y lupinos |
+| **Viñas de Colchagua** *(existe)* | A | 8–14 | **Exeggcute, Venonat, Paras**, Spinda, Pineco, Ledyba, Hoothoot, Starly, Oddish, (Cherubi, Machop, Murkrow) | Parras y pasillos |
+| **Laguna de Aculeo** *(existe)* | A | 9–17 | **Psyduck, Poliwag, Goldeen, Magikarp**, Marill, Wooper, Lotad, Surskit, (Golduck, Dratini, Lapras) | Laguna central con totoras |
+| **Bosque de Quillay** *(existe)* | A | 11–18 | **Caterpie, Weedle, Wurmple, Kricketot**, Burmy, Spinarak, Pineco, Paras, (Heracross, Scyther, Pinsir) | Bosque frondoso, 7 salvajes a la vez |
 | Despoblado de Atacama *(existe)* | A | 13–28 | tierra/roca/fuego | Muro de nivel |
 | Cordillera de Cerro Pelado | B | 36–42 | **Machoke, Graveler, Fearow**, Onix, Rapidash, (Hitmonlee, Larvitar) | Vuelve el huaso |
 | Termas y Embalse | B | 38–46 | **Golduck, Slowbro, Poliwhirl**, Seaking, Magneton, (Lapras, Vaporeon) | Termas de Cauquenes |
+
+> En la **pasada A** el Valle Central ya es un conjunto de rutas conectadas: los Pokémon pasan de los típicos de inicio (Bidoof, Starly,
+> Pidgey) a los de cada paisaje sin saltos bruscos, y cada ruta tiene sus propias probabilidades y niveles crecientes.
 
 **Gen 2–4:** Hoppip, Sentret, Hoothoot, Spinarak, Zigzagoon, Starly, Shinx, Buneary, Pachirisu (más Larvitar/Girafarig en B).
 

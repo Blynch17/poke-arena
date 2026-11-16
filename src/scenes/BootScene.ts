@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { POKEMON, walkSize } from '../data';
 import { makeFxTextures } from '../fx';
-import { makeTileTextures, makeDesertTextures } from '../tiles';
+import { makeTileTextures, makeDesertTextures, makeValleTextures } from '../tiles';
 
 export class BootScene extends Phaser.Scene {
   constructor() {
@@ -30,6 +30,7 @@ export class BootScene extends Phaser.Scene {
     makeFxTextures(this);
     makeTileTextures(this);
     makeDesertTextures(this);
+    makeValleTextures(this);
     this.scene.start('Select');
   }
 }

@@ -111,22 +111,47 @@ con hierba alta, como en los juegos de la serie. Se controla un entrenador huaso
   **ese Pokémon como el primero en salir**. Si la bola cae a 3 casillas o menos de un salvaje, la batalla también empieza (huya o
   no). Tras una orden el Pokémon se queda un rato por ahí y luego vuelve contigo.
 - Junto a un tramo recto del camino espera **el huaso Anselmo** (su lugar lo fija el mapa; `RIVAL` en `src/route.ts`): si cruzas su línea de visión te reta a un
-  combate de equipos. No se puede huir ni capturar sus Pokémon; si pierdes vuelves a la entrada de la ruta, y si ganas
+  combate de equipos (lo mismo hacen los demás entrenadores de las rutas, ver más abajo). No se puede huir ni capturar sus Pokémon; si pierdes vuelves a la entrada de la ruta, y si ganas
   ya no te reta de nuevo (hasta que salgas de la aventura). Su sprite sale de `tools/make_rival_sprite.py`.
 - Qué aparece y a qué nivel está en `ROUTE_ENCOUNTERS` (`src/route.ts`); los mapas (`buildRoute()` y `buildAtacama()`)
   salen siempre iguales.
+- **Capturas:** en la aventura, un Pokémon capturado pasa a ser tuyo (con su nivel, sus ataques y los PS que le quedaban): si tienes menos
+  de 6, **entra a tu equipo**; si ya tienes 6, **queda en el PC**. Cada uno recibe un identificador propio (desde 1000), así que
+  puedes tener varios de la misma especie. El PC se conserva entre batallas y rutas (el menú Pokémon muestra cuántos hay), pero todavía no
+  tiene pantalla: cuando exista, desde ahí se podrán cambiar por los de tu equipo.
 - **Los PS y los PP se conservan entre batallas** (también los objetos gastados): nada se recupera solo, y en el menú
   Pokémon ves cuánto le queda a cada uno. Si pierdes, vuelves a la entrada y el equipo se cura. Al salir de la aventura
   al menú de equipos todo se reinicia.
 
-### Segunda ruta: Desierto de Atacama
-Al fondo de la Ruta Los Aromos (el camino sigue hasta el borde norte del mapa) se entra al **Desierto de Atacama**; al
-fondo sur del desierto se vuelve. Es la misma idea que las conexiones entre rutas de los juegos: al salir por el borde
-del mapa se oscurece la pantalla y se aparece en la entrada de la ruta vecina, con los Pokémon que tengas fuera
-siguiéndote. El desierto tiene camino de tierra, cardones, dunas, formaciones de roca roja (Valle de la Luna), un salar
-con laguna y **matorral seco** donde aparecen Pokémon salvajes de tierra, roca y fuego (Sandshrew, Diglett, Geodude,
-Cubone, Rhyhorn, Ponyta... y, muy rara vez, Arcanine y Aerodactyl), de nivel 13 a 28. Las rutas se definen en `ROUTES`
-(`src/route.ts`): cada una tiene su mapa, su tabla de encuentros y sus salidas (`exits`).
+### Rutas del Valle Central y el desierto
+Las rutas están conectadas por puertas en sus bordes (al salir por una se aparece junto a la puerta pareja de la ruta vecina, con
+los Pokémon que tengas fuera). Cada una tiene su propia forma, su paisaje, sus entrenadores y su tabla de encuentros
+(`*_ENCOUNTERS` en `src/route.ts`); a medida que avanzas por el valle los Pokémon van cambiando sin saltos bruscos.
+
+| Ruta | Forma | Retos | Nv | Sobre todo |
+|---|---|---|---|---|
+| **Ruta Los Aromos** (inicio) | naturaleza abierta con **camino marcado**, lagunitas | Anselmo y otro entrenador junto al camino | 3–10 | Bidoof, Starly, Pidgey, Rattata, Sentret |
+| **Pastizales del Rodeo** (oeste) | **corrales** de cercos de madera, pasto dorado | 4 huasos que vigilan puertas; otras puertas son pura hierba | 5–13 | Spearow, Doduo, Nidoran, Ponyta, Mankey, Miltank |
+| **Valle de las Flores** (norte de los pastizales) | **huertos** separados por setos y rocas; praderas de amapolas y lupinos | 4 entrenadores en puertas | 7–14 | Oddish, Bellsprout, Hoppip, Sunkern, Budew, Roselia, Combee |
+| **Viñas de Colchagua** (este) | **cuarteles** separados por hileras de parras | 4–5 entrenadores en puertas | 8–14 | Exeggcute, Venonat, Paras, Spinda, Pineco, Ledyba |
+| **Laguna de Aculeo** (norte de las viñas) | naturaleza abierta **sin camino marcado**: gran laguna central con totoras, rodeada de hierba alta | 3 entrenadores en las orillas | 9–17 | Psyduck, Poliwag, Goldeen, Marill, Wooper, Lotad |
+| **Bosque de Quillay** (norte del valle de flores) | **laberinto** cerrado de pasillos de 3 casillas entre muros de árboles; hasta 7 salvajes a la vez | 6 entrenadores en cruces; muchas celdas son hierba obligada | 11–18 | Caterpie, Weedle, Wurmple, Kricketot, Burmy, Spinarak |
+| **Desierto de Atacama** (norte de Los Aromos) | naturaleza abierta con camino de tierra, salar | 3 entrenadores junto al camino | 13–28 | tierra, roca y fuego |
+
+- **Rutas de «salas»** (`layout: 'rooms'`): el mapa se divide en 3 × 3 salas con muros (cercos, setos o parras) y se unen por puertas.
+  Hay una red de puertas con algunas de más (rutas alternativas); cada puerta es **abierta**, **de hierba alta** (si quieres pasar,
+  pasas por la hierba: encuentros y Pokémon visibles) o **vigilada por un entrenador** (te ve al frente y a un lado a 6 casillas y te reta).
+  Donde hay dos puertas, o pasas por la hierba o peleas.
+- **Laberinto** (`layout: 'maze'`): se genera con el algoritmo del «retroceso», con algunos muros de menos para tener alternativas.
+  Cerca de un tercio de las celdas son hierba alta (obligada si es el único camino) y los entrenadores esperan en cruces y tramos.
+- **Entrenadores:** cada ruta define su lista de nombres; el equipo (de 1 a 3 Pokémon) sale de la tabla de encuentros de la ruta, un poco por
+  encima de los niveles de los salvajes. Un entrenador vencido no vuelve a retarte (hasta que salgas de la aventura); si pierdes, vuelves a la
+  entrada de la ruta y el equipo se cura.
+- **Caminos:** solo Los Aromos y el Desierto muestran un camino; en las demás rutas la naturaleza es el camino.
+
+El mapa de cada ruta se arma en `src/route.ts` con `buildMap()` (puertas, salas, laberinto, viñas, praderas de flores, lagunas con totoras,
+arboledas, entrenadores) y sus gráficos en `src/tiles.ts`. El Desierto de Atacama tiene salar con laguna, formaciones de roca roja
+(Valle de la Luna) y **matorral seco** donde aparecen los Pokémon de tierra, roca y fuego, de nivel 13 a 28.
 
 ## Experiencia y niveles (aventura)
 

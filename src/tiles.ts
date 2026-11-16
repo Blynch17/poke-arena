@@ -140,6 +140,72 @@ export function makeTileTextures(scene: Phaser.Scene) {
   });
 }
 
+// ---------- Valle Central: pastizal, bosque, flores, viñas y laguna ----------
+
+const PA0 = 0xc8b65c, PA1 = 0xb09a45, PA2 = 0xddcc7c;                    // pasto dorado del valle (seco en verano)
+const FO0 = 0x2f6a38, FO1 = 0x24542c, FO2 = 0x4a8a48, FO3 = 0x6b4a2a;    // suelo del bosque: musgo y hojarasca
+const VN0 = 0x3c8a3a, VN1 = 0x2a6a2c, VN2 = 0x6b2f7a, VN3 = 0x4a1f5c;    // parra y racimos
+
+const flowerDot = (px: Px, x: number, y: number, c: number, center: number) => {
+  px(x, y, center); px(x - 1, y, c); px(x + 1, y, c); px(x, y - 1, c); px(x, y + 1, c);
+};
+
+export function makeValleTextures(scene: Phaser.Scene) {
+  // pastizal: pasto dorado con matas verdes
+  tile(scene, 'tile-pasto', 301, (px, r) => {
+    fill(px, PA0);
+    for (let i = 0; i < 18; i++) px(r() * S, r() * S, PA1);
+    for (let i = 0; i < 14; i++) px(r() * S, r() * S, PA2);
+    for (let i = 0; i < 3; i++) { const x = 3 + r() * 26, y = 3 + r() * 26; px(x, y, G1); px(x + 1, y + 1, G1); px(x + 2, y, G1); }
+  });
+
+  // suelo del bosque
+  tile(scene, 'tile-forest', 302, (px, r) => {
+    fill(px, FO0);
+    for (let i = 0; i < 20; i++) px(r() * S, r() * S, FO1);
+    for (let i = 0; i < 10; i++) px(r() * S, r() * S, FO2);
+    for (let i = 0; i < 5; i++) { const x = r() * 30, y = r() * 30; px(x, y, FO3); px(x + 1, y, FO3); }   // hojarasca
+  });
+
+  // flores: amapolas rojas y lupinos azul violeta sobre pasto
+  tile(scene, 'tile-poppy', 303, (px, r) => {
+    grass(px, r);
+    for (let i = 0; i < 9; i++) flowerDot(px, 3 + r() * 26, 3 + r() * 26, 0xe83a2a, 0x2a1a10);
+    for (let i = 0; i < 3; i++) flowerDot(px, 3 + r() * 26, 3 + r() * 26, 0xffd23f, 0xf2a900);
+  });
+  tile(scene, 'tile-lupine', 304, (px, r) => {
+    grass(px, r);
+    for (let i = 0; i < 7; i++) {   // espigas de lupino
+      const x = 3 + r() * 26, y = 8 + r() * 20;
+      for (let k = 0; k < 5; k++) { px(x, y - k, k % 2 ? 0x8a5cd6 : 0x6a7cf0); if (k > 1) px(x + 1, y - k, 0xb08cf0); }
+      px(x, y + 1, G1);
+    }
+    for (let i = 0; i < 3; i++) flowerDot(px, 3 + r() * 26, 3 + r() * 26, 0xffffff, 0xffd23f);
+  });
+
+  // hilera de vides: postes, parra frondosa y racimos
+  tile(scene, 'tile-vine', 305, (px, r) => {
+    grass(px, r);
+    for (let x = 4; x < 28; x++) for (let y = 27; y < 31; y++) if (((x - 16) / 13) ** 2 + ((y - 29) / 2.5) ** 2 <= 1) px(x, y, G1);   // sombra
+    rect(px, 3, 12, 3, 19, TR0); rect(px, 26, 12, 3, 19, TR0);                                                                       // postes
+    rect(px, 0, 15, S, 1, 0xb8b8b0); rect(px, 0, 22, S, 1, 0xb8b8b0);                                                               // alambres
+    for (let x = 1; x < 31; x++) for (let y = 8; y < 28; y++) if (((x - 16) / 15.5) ** 2 + ((y - 17) / 9) ** 2 <= 1) px(x, y, VN1);
+    for (let x = 2; x < 30; x++) for (let y = 9; y < 25; y++) if (((x - 15) / 13.5) ** 2 + ((y - 16) / 7.5) ** 2 <= 1) px(x, y, VN0);
+    for (let i = 0; i < 26; i++) px(3 + r() * 26, 9 + r() * 14, 0x66b05a);
+    for (const [cx, cy] of [[8, 22], [15, 24], [22, 22], [12, 26], [19, 27]]) { disc(px, cx, cy, 2.2, VN2); px(cx - 1, cy - 1, 0xa05cb0); px(cx + 1, cy + 1, VN3); }   // racimos
+  });
+
+  // totoras de la laguna: cañas y espigas sobre pasto
+  tile(scene, 'tile-reed', 306, (px, r) => {
+    grass(px, r);
+    for (const [x, h] of [[6, 20], [11, 24], [16, 18], [21, 23], [26, 19], [9, 14], [23, 15]] as [number, number][]) {
+      for (let k = 0; k < h; k++) px(x, 30 - k, k % 3 ? 0x7a9a3a : 0x5a7a2a);
+      rect(px, x - 1, 30 - h - 4, 3, 5, 0x6a4226); px(x, 30 - h - 5, 0x8a5a30);     // espiga
+    }
+    for (let i = 0; i < 8; i++) px(4 + r() * 24, 24 + r() * 7, 0x4a6a2a);
+  });
+}
+
 // ---------- Desierto de Atacama ----------
 
 const S0 = 0xe2c58b, S1 = 0xd0ab6e, S2 = 0xf2dfae, S3 = 0xbf9a5c;       // arena
